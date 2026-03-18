@@ -7,8 +7,10 @@ description = "CLI for local RAG (storage layout + plumbing)"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+indicatif = "0.17"
 lancedb = "0.26"
 pdf-extract = "0.10"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }

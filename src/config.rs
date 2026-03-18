@@ -16,17 +16,21 @@ pub struct Config {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelsConfig {
     pub embed: String,
     pub chat: String,
+    pub vision: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OllamaConfig {
     pub base_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChunkConfig {
     pub size: usize,
     pub overlap: usize,
@@ -37,6 +41,7 @@ impl Default for ModelsConfig {
         Self {
             embed: "nomic-embed-text-v2-moe:latest".to_string(),
             chat: "qwen3.5:4b".to_string(),
+            vision: "qwen3.5:4b".to_string(),
         }
     }
 }
@@ -140,6 +145,7 @@ mod tests {
         let cfg = load_or_create_config(&store).unwrap();
         assert_eq!(cfg.models.embed, "nomic-embed-text-v2-moe:latest");
         assert_eq!(cfg.models.chat, "qwen3.5:4b");
+        assert_eq!(cfg.models.vision, "qwen3.5:4b");
         assert!(config_path(&store).exists());
 
         let cfg2 = load_or_create_config(&store).unwrap();

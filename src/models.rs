@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use reqwest::Client;
 use serde::Deserialize;
+use std::path::Path;
 use std::time::Duration;
 
 pub struct Embedder {
@@ -10,6 +12,12 @@ pub struct Embedder {
 }
 
 pub struct Generator {
+    client: Client,
+    base_url: String,
+    model: String,
+}
+
+pub struct VisionCaptioner {
     client: Client,
     base_url: String,
     model: String,
@@ -177,6 +185,61 @@ impl Generator {
 
         let parsed: ChatResponse =
             serde_json::from_str(&body).context("parse Ollama chat response")?;
+        Ok(parsed.message.content)
+    }
+}
+
+impl VisionCaptioner {
+    pub fn new(base_url: String, model: String) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(Duration::from_secs(180))
+                .build()
+                .expect("build reqwest client"),
+            base_url,
+            model,
+        }
+    }
+
+    pub async fn caption_image(&self, image_path: &Path) -> Result<String> {
+        let bytes = std::fs::read(image_path)
+            .with_context(|| format!("read image: {}", image_path.display()))?;
+        let image_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "model": self.model,
+                "stream": false,
+                "think": false,
+                "options": {
+                    "num_predict": 128,
+                },
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Describe this image for retrieval. Focus on the subjects, setting, and notable visual details.",
+                        "images": [image_b64],
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .context("call Ollama vision chat API")?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("read Ollama vision response")?;
+        if !status.is_success() {
+            anyhow::bail!("Ollama vision API error: {} - {}", status, body);
+        }
+
+        let parsed: ChatResponse =
+            serde_json::from_str(&body).context("parse Ollama vision response")?;
         Ok(parsed.message.content)
     }
 }
