@@ -1,6 +1,7 @@
-use crate::models::Embedder;
+use crate::models::{Embedder, VisionCaptioner};
 use crate::store::ChunkRow;
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -26,6 +27,7 @@ pub struct IngestResult {
 enum FileKind {
     Text,
     Pdf,
+    Image,
     Unsupported,
 }
 
@@ -34,8 +36,10 @@ pub async fn ingest_path(
     chunk_size: usize,
     overlap: usize,
     embedder: &Embedder,
+    vision: Option<&VisionCaptioner>,
 ) -> Result<IngestResult> {
     let files = collect_files(path)?;
+    let progress = build_progress_bar(files.len() as u64);
     let mut rows = Vec::new();
     let mut source_paths = BTreeSet::new();
     let mut dim = None;
@@ -47,11 +51,13 @@ pub async fn ingest_path(
     };
 
     for file in files {
+        progress.set_message(format!("Reading {}", display_name(&file)));
         match file_kind(&file) {
             FileKind::Text => {
                 source_paths.insert(file.display().to_string());
                 match load_text_file(&file) {
                     Ok(text) => {
+                        progress.set_message(format!("Embedding {}", display_name(&file)));
                         let chunks = chunk_text(&text, chunk_size, overlap);
                         match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
                             Ok(mut file_rows) => {
@@ -73,6 +79,7 @@ pub async fn ingest_path(
             }
             FileKind::Pdf => {
                 source_paths.insert(file.display().to_string());
+                progress.set_message(format!("Extracting {}", display_name(&file)));
                 match extract_text_by_pages(&file)
                     .with_context(|| format!("extract pdf text: {}", file.display()))
                 {
@@ -81,6 +88,11 @@ pub async fn ingest_path(
                         let mut file_failed = None;
                         for (page_idx, page_text) in pages.into_iter().enumerate() {
                             let page_num = (page_idx + 1) as i32;
+                            progress.set_message(format!(
+                                "Embedding {} (page {})",
+                                display_name(&file),
+                                page_num
+                            ));
                             let chunks = chunk_text(&page_text, chunk_size, overlap);
                             match embed_chunks(&file, page_num, chunks, embedder, &mut dim).await {
                                 Ok(mut page_rows) => file_rows.append(&mut page_rows),
@@ -106,9 +118,49 @@ pub async fn ingest_path(
                     }
                 }
             }
+            FileKind::Image => {
+                source_paths.insert(file.display().to_string());
+                let Some(vision) = vision else {
+                    stats.skipped_files += 1;
+                    stats.errors.push(format!(
+                        "{}: image skipped because no vision model is configured",
+                        file.display()
+                    ));
+                    continue;
+                };
+
+                progress.set_message(format!("Captioning {}", display_name(&file)));
+                match vision.caption_image(&file).await {
+                    Ok(caption) => {
+                        progress.set_message(format!("Embedding {}", display_name(&file)));
+                        let chunks = vec![build_image_retrieval_text(&file, &caption)];
+                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
+                            Ok(mut file_rows) => {
+                                stats.indexed_files += 1;
+                                stats.total_chunks += file_rows.len();
+                                rows.append(&mut file_rows);
+                            }
+                            Err(err) => {
+                                stats.skipped_files += 1;
+                                stats.errors.push(format!("{}: {}", file.display(), err));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        stats.skipped_files += 1;
+                        stats.errors.push(format!("{}: {}", file.display(), err));
+                    }
+                }
+            }
             FileKind::Unsupported => {}
         }
+        progress.inc(1);
     }
+
+    progress.finish_with_message(format!(
+        "Indexed {} file(s), wrote {} chunk(s)",
+        stats.indexed_files, stats.total_chunks
+    ));
 
     Ok(IngestResult {
         rows,
@@ -175,6 +227,7 @@ fn file_kind(path: &Path) -> FileKind {
     match ext.as_str() {
         "md" | "markdown" | "txt" | "rst" => FileKind::Text,
         "pdf" => FileKind::Pdf,
+        "png" | "jpg" | "jpeg" | "webp" => FileKind::Image,
         _ => FileKind::Unsupported,
     }
 }
@@ -182,6 +235,28 @@ fn file_kind(path: &Path) -> FileKind {
 fn load_text_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn build_progress_bar(total_files: u64) -> ProgressBar {
+    let bar = ProgressBar::new(total_files.max(1));
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}",
+    )
+    .expect("valid progress template")
+    .progress_chars("=>-");
+    bar.set_style(style);
+    bar
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn build_image_retrieval_text(path: &Path, caption: &str) -> String {
+    format!("File: {}\nCaption: {}", display_name(path), caption.trim())
 }
 
 pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {

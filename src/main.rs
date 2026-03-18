@@ -14,8 +14,9 @@ use config::{
 use futures::TryStreamExt;
 use ingest::ingest_path;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use models::{Embedder, Generator, OllamaClient};
+use models::{Embedder, Generator, OllamaClient, VisionCaptioner};
 use std::fs;
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{connect_db, ensure_metadata, extract_contexts, load_metadata, replace_source_rows};
 
@@ -51,6 +52,7 @@ async fn cmd_index(
     chunk_overlap: Option<usize>,
     embed_model: Option<String>,
 ) -> Result<()> {
+    let started = Instant::now();
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let cfg = load_or_create_config(&store)?;
@@ -63,7 +65,11 @@ async fn cmd_index(
         embed_model.unwrap_or_else(|| resolve_model_name(&store, &cfg.models.embed));
 
     let embedder = Embedder::new(cfg.ollama.base_url.clone(), embed_model_name.clone());
-    let result = ingest_path(&path, size, overlap, &embedder).await?;
+    let vision = VisionCaptioner::new(
+        cfg.ollama.base_url.clone(),
+        resolve_model_name(&store, &cfg.models.vision),
+    );
+    let result = ingest_path(&path, size, overlap, &embedder, Some(&vision)).await?;
 
     if let Some(dim) = result.embedding_dim {
         ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
@@ -78,6 +84,7 @@ async fn cmd_index(
     println!("  indexed files: {}", result.stats.indexed_files);
     println!("  skipped files: {}", result.stats.skipped_files);
     println!("  chunks written: {}", result.stats.total_chunks);
+    println!("  elapsed: {:.2?}", started.elapsed());
 
     if !result.stats.errors.is_empty() {
         println!("  errors:");
@@ -173,6 +180,7 @@ async fn cmd_doctor(name: Option<&str>) -> Result<()> {
     println!("  ollama url: {}", cfg.ollama.base_url);
     println!("  embed model: {}", cfg.models.embed);
     println!("  chat model: {}", cfg.models.chat);
+    println!("  vision model: {}", cfg.models.vision);
 
     let ollama = OllamaClient::new(cfg.ollama.base_url.clone());
     match ollama.list_models().await {
@@ -185,6 +193,10 @@ async fn cmd_doctor(name: Option<&str>) -> Result<()> {
             println!(
                 "  chat model installed: {}",
                 status(models.iter().any(|model| model == &cfg.models.chat))
+            );
+            println!(
+                "  vision model installed: {}",
+                status(models.iter().any(|model| model == &cfg.models.vision))
             );
         }
         Err(err) => {
