@@ -122,15 +122,12 @@ pub async fn replace_source_rows(
             .await?;
     }
 
-    if rows.is_empty() {
-        ensure_fts_index(&table, true).await?;
-        return Ok(());
+    if !rows.is_empty() {
+        let schema = build_schema(rows[0].embedding.len());
+        let batch = build_record_batch(schema.clone(), rows)?;
+        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        table.add(Box::new(batches)).execute().await?;
     }
-
-    let schema = build_schema(rows[0].embedding.len());
-    let batch = build_record_batch(schema.clone(), rows)?;
-    let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
-    table.add(Box::new(batches)).execute().await?;
     ensure_fts_index(&table, true).await?;
     Ok(())
 }
@@ -150,9 +147,7 @@ pub async fn ensure_fts_index(table: &Table, replace: bool) -> Result<()> {
         &[DEFAULT_FTS_COLUMN],
         Index::FTS(FtsIndexBuilder::default()),
     );
-    if has_fts && replace {
-        builder = builder.replace(true);
-    }
+    builder = builder.replace(replace);
     builder.execute().await.context("create FTS index")?;
     Ok(())
 }
