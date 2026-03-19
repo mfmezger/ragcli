@@ -123,7 +123,7 @@ pub async fn replace_source_rows(
     }
 
     if rows.is_empty() {
-        ensure_fts_index(&table, false).await?;
+        ensure_fts_index(&table, true).await?;
         return Ok(());
     }
 
@@ -348,9 +348,9 @@ mod tests {
         let batches: Vec<RecordBatch> = table
             .query()
             .full_text_search(FullTextSearchQuery::new("rarekeyword".to_string()))
-            .limit(2)
             .nearest_to(&[-10.0, -10.0])
             .unwrap()
+            .limit(2)
             .execute()
             .await
             .unwrap()
