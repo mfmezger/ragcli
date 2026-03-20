@@ -3,6 +3,9 @@ use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use lancedb::database::CreateTableMode;
+use lancedb::index::scalar::FtsIndexBuilder;
+use lancedb::index::Index;
+use lancedb::index::IndexType;
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -11,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const DEFAULT_TABLE_NAME: &str = "chunks";
+pub const DEFAULT_FTS_COLUMN: &str = "chunk_text";
 const STORE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug)]
@@ -118,14 +122,33 @@ pub async fn replace_source_rows(
             .await?;
     }
 
-    if rows.is_empty() {
+    if !rows.is_empty() {
+        let schema = build_schema(rows[0].embedding.len());
+        let batch = build_record_batch(schema.clone(), rows)?;
+        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
+        table.add(Box::new(batches)).execute().await?;
+    }
+    ensure_fts_index(&table, true).await?;
+    Ok(())
+}
+
+pub async fn ensure_fts_index(table: &Table, replace: bool) -> Result<()> {
+    let has_fts = table.list_indices().await?.into_iter().any(|index| {
+        index.index_type == IndexType::FTS
+            && index.columns.len() == 1
+            && index.columns[0] == DEFAULT_FTS_COLUMN
+    });
+
+    if has_fts && !replace {
         return Ok(());
     }
 
-    let schema = build_schema(rows[0].embedding.len());
-    let batch = build_record_batch(schema.clone(), rows)?;
-    let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema);
-    table.add(Box::new(batches)).execute().await?;
+    let mut builder = table.create_index(
+        &[DEFAULT_FTS_COLUMN],
+        Index::FTS(FtsIndexBuilder::default()),
+    );
+    builder = builder.replace(replace);
+    builder.execute().await.context("create FTS index")?;
     Ok(())
 }
 
@@ -244,7 +267,9 @@ fn sql_string(value: &str) -> String {
 mod tests {
     use super::*;
     use futures::TryStreamExt;
+    use lancedb::index::scalar::FullTextSearchQuery;
     use lancedb::query::ExecutableQuery;
+    use lancedb::query::QueryBase;
 
     fn sample_row(source_path: &str, text: &str, value: f32) -> ChunkRow {
         ChunkRow {
@@ -296,6 +321,44 @@ mod tests {
         assert_eq!(contexts.len(), 2);
         assert!(contexts.iter().any(|ctx| ctx.contains("new")));
         assert!(!contexts.iter().any(|ctx| ctx.contains("old")));
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_search_keeps_keyword_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                sample_row("a.txt", "semantic neighbor", -10.0),
+                sample_row("b.txt", "rarekeyword exact match", 100.0),
+            ],
+            &["a.txt".to_string(), "b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let table = db.open_table(DEFAULT_TABLE_NAME).execute().await.unwrap();
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .full_text_search(FullTextSearchQuery::new("rarekeyword".to_string()))
+            .nearest_to(&[-10.0, -10.0])
+            .unwrap()
+            .limit(2)
+            .execute()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let contexts = extract_contexts(&batches).unwrap();
+
+        assert_eq!(contexts.len(), 2);
+        assert!(contexts.iter().any(|ctx| ctx.contains("semantic neighbor")));
+        assert!(contexts
+            .iter()
+            .any(|ctx| ctx.contains("rarekeyword exact match")));
     }
 
     #[test]

@@ -13,12 +13,16 @@ use config::{
 };
 use futures::TryStreamExt;
 use ingest::ingest_path;
+use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use models::{Embedder, Generator, OllamaClient, VisionCaptioner};
 use std::fs;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use store::{connect_db, ensure_metadata, extract_contexts, load_metadata, replace_source_rows};
+use store::{
+    connect_db, ensure_fts_index, ensure_metadata, extract_contexts, load_metadata,
+    replace_source_rows,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -119,12 +123,14 @@ async fn cmd_query(
         .execute()
         .await
         .context("open table")?;
+    ensure_fts_index(&table, false).await?;
 
     let embedder = Embedder::new(cfg.ollama.base_url.clone(), embed_model_name);
     let embedding = embedder.embed(&question).await?;
 
     let batches: Vec<arrow_array::RecordBatch> = table
         .query()
+        .full_text_search(FullTextSearchQuery::new(question.clone()))
         .nearest_to(embedding.as_slice())?
         .limit(top_k)
         .execute()

@@ -8,6 +8,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 
 - local text, Markdown, PDF, and image indexing
 - local embedding and generation through Ollama
+- hybrid retrieval with LanceDB vector search + BM25 full-text search
 - persistent per-store data under `~/.config/ragcli/<name>`
 - idempotent re-indexing by `source_path`
 - compatibility checks for embedding model + chunk settings
@@ -103,6 +104,7 @@ Each store lives under:
 - Re-indexing replaces existing rows for the same `source_path`.
 - Text files are decoded lossily, so non-UTF-8 files do not abort indexing.
 - Images are captioned with an Ollama vision model at index time and stored as text for retrieval.
+- Queries use LanceDB hybrid search: semantic nearest-neighbor search plus BM25 full-text search on `chunk_text`.
 - Querying refuses to mix a store with a different embedding model than the one used to build it.
 - Ollama chat requests are sent with `think: false` to reduce hangs with reasoning-capable models.
 
