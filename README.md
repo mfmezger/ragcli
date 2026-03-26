@@ -13,6 +13,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 - idempotent re-indexing by `source_path`
 - compatibility checks for embedding model + chunk settings
 - `doctor` checks for store state, Ollama reachability, and installed models
+- `stat` summarizes indexed content, approximate embedded token volume, and store disk usage
 - optional retrieval inspection with `query --show-context`
 
 ## Quick Start
@@ -27,6 +28,7 @@ ollama pull nomic-embed-text-v2-moe:latest
 ollama pull qwen3.5:4b
 
 cargo run -- doctor
+cargo run -- stat
 cargo run -- index ./docs
 cargo run -- query "What is this project about?"
 ```
@@ -58,6 +60,12 @@ Check local setup:
 
 ```bash
 cargo run -- doctor
+```
+
+Inspect what is already embedded:
+
+```bash
+cargo run -- stat
 ```
 
 ## Configuration

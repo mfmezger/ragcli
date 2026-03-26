@@ -43,6 +43,8 @@ pub enum Command {
         #[arg(long, default_value_t = 256)]
         max_tokens: usize,
     },
+    /// Show a summary of indexed content and store usage
+    Stat,
     /// Check store layout and status
     Doctor,
 }
