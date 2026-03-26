@@ -43,8 +43,26 @@ pub enum Command {
         #[arg(long, default_value_t = 256)]
         max_tokens: usize,
     },
+    /// Show or update config values
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Show a summary of indexed content and store usage
     Stat,
     /// Check store layout and status
     Doctor,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Print the effective config for this store
+    Show,
+    /// Set a config key in ~/.config/ragcli/<name>/config.toml
+    Set {
+        /// Config key such as models.embed or ollama.base_url
+        key: String,
+        /// New value to write
+        value: String,
+    },
 }

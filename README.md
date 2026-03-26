@@ -92,6 +92,23 @@ size = 1000
 overlap = 200
 ```
 
+Effective runtime values can be overridden with environment variables:
+
+```bash
+export RAGCLI_OLLAMA_URL=http://localhost:11434
+export RAGCLI_EMBED_MODEL=nomic-embed-text-v2-moe:latest
+export RAGCLI_CHAT_MODEL=qwen3.5:4b
+export RAGCLI_VISION_MODEL=qwen3.5:4b
+```
+
+You can inspect and update config without editing TOML by hand:
+
+```bash
+cargo run -- config show
+cargo run -- config set models.embed nomic-embed-text-v2-moe:latest
+cargo run -- config set ollama.base_url http://localhost:11434
+```
+
 ## Storage
 
 Each store lives under:

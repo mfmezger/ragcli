@@ -6,10 +6,11 @@ mod store;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{Cli, Command, ConfigCommand};
 use config::{
-    ensure_store_layout, load_or_create_config, normalize_chunk_settings, resolve_model_name,
-    status, store_dir,
+    ensure_store_layout, load_or_create_config, load_or_create_config_with_sources,
+    load_or_create_file_config, normalize_chunk_settings, resolve_model_name, save_config, status,
+    store_dir,
 };
 use futures::TryStreamExt;
 use ingest::ingest_path;
@@ -44,6 +45,10 @@ async fn main() -> Result<()> {
             gen_model,
             max_tokens,
         } => cmd_query(name, question, top_k, show_context, gen_model, max_tokens).await?,
+        Command::Config { command } => match command {
+            ConfigCommand::Show => cmd_config_show(name).await?,
+            ConfigCommand::Set { key, value } => cmd_config_set(name, key, value).await?,
+        },
         Command::Stat => cmd_stat(name).await?,
         Command::Doctor => cmd_doctor(name).await?,
     }
@@ -322,6 +327,40 @@ async fn cmd_doctor(name: Option<&str>) -> Result<()> {
         println!("  {}: {} ({})", sub, path.display(), status(path.exists()));
     }
 
+    Ok(())
+}
+
+async fn cmd_config_show(name: Option<&str>) -> Result<()> {
+    let store = store_dir(name)?;
+    ensure_store_layout(&store)?;
+    let (cfg, sources) = load_or_create_config_with_sources(&store)?;
+
+    println!("Store: {}", store.display());
+    println!("Config: {}", config::config_path(&store).display());
+    println!();
+    println!("{}", toml::to_string_pretty(&cfg)?);
+
+    let overrides = sources.overrides();
+
+    if !overrides.is_empty() {
+        println!("Active environment overrides:");
+        for override_entry in overrides {
+            println!("  {}", override_entry);
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_config_set(name: Option<&str>, key: String, value: String) -> Result<()> {
+    let store = store_dir(name)?;
+    ensure_store_layout(&store)?;
+    let mut cfg = load_or_create_file_config(&store)?;
+    cfg.set_path(&key, &value)?;
+    save_config(&store, &cfg)?;
+
+    println!("Updated {}", config::config_path(&store).display());
+    println!("  {} = {}", key, value);
     Ok(())
 }
 
