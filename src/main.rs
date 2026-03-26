@@ -17,11 +17,12 @@ use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use models::{Embedder, Generator, OllamaClient, VisionCaptioner};
 use std::fs;
+use std::path::Path;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{
-    connect_db, ensure_fts_index, ensure_metadata, extract_contexts, load_metadata,
-    replace_source_rows,
+    collect_store_stats, connect_db, ensure_fts_index, ensure_metadata, extract_contexts,
+    load_metadata, replace_source_rows,
 };
 
 #[tokio::main]
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
             gen_model,
             max_tokens,
         } => cmd_query(name, question, top_k, show_context, gen_model, max_tokens).await?,
+        Command::Stat => cmd_stat(name).await?,
         Command::Doctor => cmd_doctor(name).await?,
     }
 
@@ -164,6 +166,100 @@ async fn cmd_query(
     Ok(())
 }
 
+async fn cmd_stat(name: Option<&str>) -> Result<()> {
+    let store = store_dir(name)?;
+    ensure_store_layout(&store)?;
+    let cfg = load_or_create_config(&store)?;
+    let metadata = load_metadata(&store).ok();
+    let db = connect_db(&store).await?;
+
+    let table = match db.open_table(store::DEFAULT_TABLE_NAME).execute().await {
+        Ok(table) => Some(table),
+        Err(_) => None,
+    };
+
+    let mut batches = Vec::new();
+    if let Some(table) = &table {
+        batches = table
+            .query()
+            .execute()
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+    }
+
+    let stats = collect_store_stats(&batches, 5)?;
+    let total_store_bytes = dir_size_bytes(&store)?;
+    let lancedb_bytes = dir_size_bytes(&store.join("lancedb"))?;
+    let meta_bytes = dir_size_bytes(&store.join("meta"))?;
+    let cache_bytes = dir_size_bytes(&store.join("cache"))?;
+    let models_bytes = dir_size_bytes(&store.join("models"))?;
+
+    println!("Store summary");
+    println!("  store: {}", store.display());
+    println!("  ollama url: {}", cfg.ollama.base_url);
+    println!("  rows embedded: {}", stats.total_chunks);
+    println!("  source files: {}", stats.unique_sources);
+    println!(
+        "  content mix: {} text, {} pdf, {} image, {} other",
+        stats.content_kinds.text_files,
+        stats.content_kinds.pdf_files,
+        stats.content_kinds.image_files,
+        stats.content_kinds.other_files
+    );
+    println!("  pdf pages: {}", stats.pdf_pages);
+    println!("  embedded chars: {}", fmt_count(stats.total_chars));
+    println!(
+        "  estimated embedded tokens: ~{}",
+        fmt_count(stats.estimated_tokens)
+    );
+
+    if stats.total_chunks > 0 {
+        println!(
+            "  avg chunk: {} chars, ~{} tokens",
+            stats.total_chars / stats.total_chunks,
+            stats.estimated_tokens / stats.total_chunks
+        );
+        println!(
+            "  chunk range: {}..{} chars",
+            stats.min_chunk_chars, stats.max_chunk_chars
+        );
+    }
+
+    if let Some(metadata) = metadata {
+        println!(
+            "  embedding: {} (dim {})",
+            metadata.embed_model, metadata.embedding_dim
+        );
+        println!(
+            "  chunking: size {}, overlap {}",
+            metadata.chunk_size, metadata.chunk_overlap
+        );
+    } else {
+        println!("  embedding: metadata missing");
+    }
+
+    println!("  disk usage: {}", fmt_bytes(total_store_bytes));
+    println!("    lancedb: {}", fmt_bytes(lancedb_bytes));
+    println!("    meta: {}", fmt_bytes(meta_bytes));
+    println!("    cache: {}", fmt_bytes(cache_bytes));
+    println!("    models: {}", fmt_bytes(models_bytes));
+
+    if !stats.top_sources.is_empty() {
+        println!("  top sources by chunk count:");
+        for source in &stats.top_sources {
+            println!(
+                "    - {}  [{} chunks, ~{} tokens]",
+                source.source_path,
+                source.chunks,
+                fmt_count(source.estimated_tokens)
+            );
+        }
+    }
+
+    Ok(())
+}
+
 async fn cmd_doctor(name: Option<&str>) -> Result<()> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
@@ -227,4 +323,52 @@ async fn cmd_doctor(name: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn dir_size_bytes(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    if path.is_file() {
+        return Ok(path.metadata()?.len());
+    }
+
+    let mut total = 0_u64;
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry?;
+        if entry.file_type().is_file() {
+            total += entry.metadata()?.len();
+        }
+    }
+    Ok(total)
+}
+
+fn fmt_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn fmt_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    let len = digits.len();
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (len - idx).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
