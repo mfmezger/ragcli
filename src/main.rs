@@ -10,7 +10,7 @@ use cli::{Cli, Command, ConfigCommand};
 use config::{
     ensure_store_layout, load_or_create_config, load_or_create_config_with_sources,
     load_or_create_file_config, normalize_chunk_settings, resolve_model_name, save_config, status,
-    store_dir, ConfigValueSource,
+    store_dir,
 };
 use futures::TryStreamExt;
 use ingest::ingest_path;
@@ -244,19 +244,7 @@ async fn cmd_config_show(name: Option<&str>) -> Result<()> {
     println!();
     println!("{}", toml::to_string_pretty(&cfg)?);
 
-    let mut overrides = Vec::new();
-    if let ConfigValueSource::Env(var) = sources.ollama_base_url {
-        overrides.push(format!("ollama.base_url <- {}", var));
-    }
-    if let ConfigValueSource::Env(var) = sources.models_embed {
-        overrides.push(format!("models.embed <- {}", var));
-    }
-    if let ConfigValueSource::Env(var) = sources.models_chat {
-        overrides.push(format!("models.chat <- {}", var));
-    }
-    if let ConfigValueSource::Env(var) = sources.models_vision {
-        overrides.push(format!("models.vision <- {}", var));
-    }
+    let overrides = sources.overrides();
 
     if !overrides.is_empty() {
         println!("Active environment overrides:");

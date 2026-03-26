@@ -103,6 +103,25 @@ impl Default for ConfigSources {
     }
 }
 
+impl ConfigSources {
+    pub fn overrides(&self) -> Vec<String> {
+        let mut overrides = Vec::new();
+        if let ConfigValueSource::Env(var) = self.ollama_base_url {
+            overrides.push(format!("ollama.base_url <- {}", var));
+        }
+        if let ConfigValueSource::Env(var) = self.models_embed {
+            overrides.push(format!("models.embed <- {}", var));
+        }
+        if let ConfigValueSource::Env(var) = self.models_chat {
+            overrides.push(format!("models.chat <- {}", var));
+        }
+        if let ConfigValueSource::Env(var) = self.models_vision {
+            overrides.push(format!("models.vision <- {}", var));
+        }
+        overrides
+    }
+}
+
 pub fn base_dir() -> Result<PathBuf> {
     let xdg_dirs = xdg::BaseDirectories::with_prefix("ragcli")?;
     Ok(xdg_dirs.get_config_home())
@@ -159,20 +178,8 @@ pub fn resolve_model_name(_store: &Path, model: &str) -> String {
 }
 
 impl Config {
-    pub fn apply_env_overrides(mut self) -> Self {
-        if let Ok(value) = env::var(ENV_OLLAMA_URL) {
-            self.ollama.base_url = value;
-        }
-        if let Ok(value) = env::var(ENV_EMBED_MODEL) {
-            self.models.embed = value;
-        }
-        if let Ok(value) = env::var(ENV_CHAT_MODEL) {
-            self.models.chat = value;
-        }
-        if let Ok(value) = env::var(ENV_VISION_MODEL) {
-            self.models.vision = value;
-        }
-        self
+    pub fn apply_env_overrides(self) -> Self {
+        self.apply_env_overrides_with_sources().0
     }
 
     pub fn apply_env_overrides_with_sources(mut self) -> (Self, ConfigSources) {
@@ -237,6 +244,12 @@ pub fn status(exists: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_config_create_and_reload() {
@@ -298,6 +311,7 @@ mod tests {
 
     #[test]
     fn test_apply_env_overrides_with_sources() {
+        let _guard = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("store");
         fs::create_dir_all(&store).unwrap();
@@ -318,6 +332,11 @@ overlap = 200
 "#,
         )
         .unwrap();
+
+        let previous_ollama_url = env::var_os(ENV_OLLAMA_URL);
+        let previous_embed_model = env::var_os(ENV_EMBED_MODEL);
+        let previous_chat_model = env::var_os(ENV_CHAT_MODEL);
+        let previous_vision_model = env::var_os(ENV_VISION_MODEL);
 
         unsafe {
             env::set_var(ENV_OLLAMA_URL, "http://remote:11434");
@@ -347,10 +366,22 @@ overlap = 200
         );
 
         unsafe {
-            env::remove_var(ENV_OLLAMA_URL);
-            env::remove_var(ENV_EMBED_MODEL);
-            env::remove_var(ENV_CHAT_MODEL);
-            env::remove_var(ENV_VISION_MODEL);
+            match previous_ollama_url {
+                Some(value) => env::set_var(ENV_OLLAMA_URL, value),
+                None => env::remove_var(ENV_OLLAMA_URL),
+            }
+            match previous_embed_model {
+                Some(value) => env::set_var(ENV_EMBED_MODEL, value),
+                None => env::remove_var(ENV_EMBED_MODEL),
+            }
+            match previous_chat_model {
+                Some(value) => env::set_var(ENV_CHAT_MODEL, value),
+                None => env::remove_var(ENV_CHAT_MODEL),
+            }
+            match previous_vision_model {
+                Some(value) => env::set_var(ENV_VISION_MODEL, value),
+                None => env::remove_var(ENV_VISION_MODEL),
+            }
         }
     }
 }
