@@ -8,7 +8,7 @@ use lancedb::index::Index;
 use lancedb::index::IndexType;
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +36,35 @@ pub struct StoreMetadata {
     pub embedding_dim: usize,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct ContentKindCounts {
+    pub text_files: usize,
+    pub pdf_files: usize,
+    pub image_files: usize,
+    pub other_files: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct SourceChunkStat {
+    pub source_path: String,
+    pub chunks: usize,
+    pub chars: usize,
+    pub estimated_tokens: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct StoreStats {
+    pub total_chunks: usize,
+    pub unique_sources: usize,
+    pub pdf_pages: usize,
+    pub total_chars: usize,
+    pub estimated_tokens: usize,
+    pub min_chunk_chars: usize,
+    pub max_chunk_chars: usize,
+    pub content_kinds: ContentKindCounts,
+    pub top_sources: Vec<SourceChunkStat>,
 }
 
 impl StoreMetadata {
@@ -247,6 +276,94 @@ pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<StoreStats> {
+    let mut stats = StoreStats::default();
+    let mut source_stats: BTreeMap<String, SourceChunkStat> = BTreeMap::new();
+    let mut pdf_pages = BTreeSet::new();
+
+    for batch in batches {
+        let text_col = batch
+            .column_by_name("chunk_text")
+            .context("chunk_text column missing")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("chunk_text column type")?;
+        let source_col = batch
+            .column_by_name("source_path")
+            .context("source_path column missing")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("source_path column type")?;
+        let page_col = batch
+            .column_by_name("page")
+            .context("page column missing")?
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .context("page column type")?;
+
+        for i in 0..batch.num_rows() {
+            let source = source_col.value(i);
+            let text = text_col.value(i);
+            let chars = text.chars().count();
+            let estimated_tokens = estimate_token_count(text);
+
+            stats.total_chunks += 1;
+            stats.total_chars += chars;
+            stats.estimated_tokens += estimated_tokens;
+            if stats.total_chunks == 1 {
+                stats.min_chunk_chars = chars;
+                stats.max_chunk_chars = chars;
+            } else {
+                stats.min_chunk_chars = stats.min_chunk_chars.min(chars);
+                stats.max_chunk_chars = stats.max_chunk_chars.max(chars);
+            }
+
+            let entry = source_stats
+                .entry(source.to_string())
+                .or_insert_with(|| SourceChunkStat {
+                    source_path: source.to_string(),
+                    ..Default::default()
+                });
+            entry.chunks += 1;
+            entry.chars += chars;
+            entry.estimated_tokens += estimated_tokens;
+
+            match classify_source_kind(source) {
+                SourceKind::Pdf => {
+                    if page_col.value(i) > 0 {
+                        pdf_pages.insert((source.to_string(), page_col.value(i)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    stats.unique_sources = source_stats.len();
+    stats.pdf_pages = pdf_pages.len();
+
+    for source in source_stats.keys() {
+        match classify_source_kind(source) {
+            SourceKind::Pdf => stats.content_kinds.pdf_files += 1,
+            SourceKind::Image => stats.content_kinds.image_files += 1,
+            SourceKind::Text => stats.content_kinds.text_files += 1,
+            SourceKind::Other => stats.content_kinds.other_files += 1,
+        }
+    }
+
+    let mut top_sources = source_stats.into_values().collect::<Vec<_>>();
+    top_sources.sort_by(|a, b| {
+        b.chunks
+            .cmp(&a.chunks)
+            .then_with(|| b.estimated_tokens.cmp(&a.estimated_tokens))
+            .then_with(|| a.source_path.cmp(&b.source_path))
+    });
+    top_sources.truncate(top_n);
+    stats.top_sources = top_sources;
+
+    Ok(stats)
+}
+
 pub fn strip_thinking(text: &str) -> String {
     if let Some(start) = text.find("<think>") {
         let end = text.find("</think>");
@@ -261,6 +378,42 @@ pub fn strip_thinking(text: &str) -> String {
 
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    Text,
+    Pdf,
+    Image,
+    Other,
+}
+
+fn classify_source_kind(source: &str) -> SourceKind {
+    let ext = Path::new(source)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("");
+
+    if ext.eq_ignore_ascii_case("pdf") {
+        SourceKind::Pdf
+    } else if ["png", "jpg", "jpeg", "webp"]
+        .iter()
+        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+    {
+        SourceKind::Image
+    } else if ["md", "markdown", "txt", "rst"]
+        .iter()
+        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+    {
+        SourceKind::Text
+    } else {
+        SourceKind::Other
+    }
+}
+
+fn estimate_token_count(text: &str) -> usize {
+    let chars = text.chars().count();
+    chars.div_ceil(4)
 }
 
 #[cfg(test)]
@@ -365,5 +518,37 @@ mod tests {
     fn test_strip_thinking() {
         let input = "<think>hidden</think>\nFinal answer.";
         assert_eq!(strip_thinking(input).trim(), "Final answer.");
+    }
+
+    #[test]
+    fn test_collect_store_stats_counts_content() {
+        let schema = build_schema(2);
+        let batch = build_record_batch(
+            schema,
+            &[
+                sample_row("notes.md", "hello world", 1.0),
+                ChunkRow {
+                    page: 1,
+                    ..sample_row("paper.pdf", "page one", 2.0)
+                },
+                ChunkRow {
+                    page: 2,
+                    ..sample_row("paper.pdf", "page two", 3.0)
+                },
+                sample_row("image.png", "caption text", 4.0),
+            ],
+        )
+        .unwrap();
+
+        let stats = collect_store_stats(&[batch], 5).unwrap();
+
+        assert_eq!(stats.total_chunks, 4);
+        assert_eq!(stats.unique_sources, 3);
+        assert_eq!(stats.content_kinds.text_files, 1);
+        assert_eq!(stats.content_kinds.pdf_files, 1);
+        assert_eq!(stats.content_kinds.image_files, 1);
+        assert_eq!(stats.pdf_pages, 2);
+        assert_eq!(stats.top_sources[0].source_path, "paper.pdf");
+        assert_eq!(stats.top_sources[0].chunks, 2);
     }
 }

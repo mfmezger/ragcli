@@ -48,6 +48,8 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Show a summary of indexed content and store usage
+    Stat,
     /// Check store layout and status
     Doctor,
 }
