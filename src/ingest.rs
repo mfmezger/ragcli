@@ -1,3 +1,5 @@
+//! File ingestion and chunking for the local RAG store.
+
 use crate::models::{Embedder, VisionCaptioner};
 use crate::store::ChunkRow;
 use anyhow::{Context, Result};
@@ -10,17 +12,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Aggregated indexing counters for a single ingest run.
 pub struct IndexStats {
+    /// Number of files indexed successfully.
     pub indexed_files: usize,
+    /// Number of files skipped due to errors or unsupported processing.
     pub skipped_files: usize,
+    /// Total number of chunks written.
     pub total_chunks: usize,
+    /// Human-readable errors encountered during indexing.
     pub errors: Vec<String>,
 }
 
+/// Result of indexing a path into chunk rows.
 pub struct IngestResult {
+    /// Chunk rows ready to write into the store.
     pub rows: Vec<ChunkRow>,
+    /// Unique source paths that were seen during ingestion.
     pub source_paths: Vec<String>,
+    /// Embedding dimension inferred from the first embedded chunk, if any.
     pub embedding_dim: Option<usize>,
+    /// Aggregate indexing statistics.
     pub stats: IndexStats,
 }
 
@@ -39,6 +51,7 @@ struct ChunkContent {
     metadata: Value,
 }
 
+/// Walks a file or directory, extracts supported content, and returns chunk rows.
 pub async fn ingest_path(
     path: &Path,
     chunk_size: usize,
@@ -377,6 +390,7 @@ fn chunk_pdf_page(
     chunks
 }
 
+/// Splits plain text into overlapping character-based chunks.
 pub fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<String> {
     if text.trim().is_empty() {
         return Vec::new();

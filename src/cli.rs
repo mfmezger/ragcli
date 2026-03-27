@@ -1,68 +1,77 @@
+//! Command-line interface definitions for `ragcli`.
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Top-level CLI arguments.
 #[derive(Parser, Debug)]
 #[command(name = "ragcli", about = "Local RAG CLI")]
 pub struct Cli {
-    /// Store name under ~/.config/ragcli (default: default)
+    /// Selects the store under `~/.config/ragcli` to operate on.
     #[arg(long, global = true)]
     pub name: Option<String>,
 
+    /// Runs one of the supported subcommands.
     #[command(subcommand)]
     pub command: Command,
 }
 
+/// Supported `ragcli` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Index a folder into the local store
+    /// Indexes a file or directory into the local store.
     Index {
+        /// Path to a file or directory to index.
         path: PathBuf,
-        /// Override chunk size (chars)
+        /// Overrides the chunk size in characters.
         #[arg(long)]
         chunk_size: Option<usize>,
-        /// Override chunk overlap (chars)
+        /// Overrides the chunk overlap in characters.
         #[arg(long)]
         chunk_overlap: Option<usize>,
-        /// Override embedding model path
+        /// Overrides the embedding model name.
         #[arg(long)]
         embed_model: Option<String>,
     },
-    /// Query the local store
+    /// Queries the local store and generates an answer.
     Query {
+        /// Natural-language question to ask.
         question: String,
-        /// Top-K results to retrieve
+        /// Number of results to retrieve before generation.
         #[arg(long, default_value_t = 5)]
         top_k: usize,
-        /// Print retrieved context snippets before answering
+        /// Prints retrieved context snippets before answering.
         #[arg(long, default_value_t = false)]
         show_context: bool,
-        /// Override generation model path
+        /// Overrides the generation model name.
         #[arg(long)]
         gen_model: Option<String>,
-        /// Max tokens to generate
+        /// Maximum number of tokens to generate.
         #[arg(long, default_value_t = 256)]
         max_tokens: usize,
     },
-    /// Show or update config values
+    /// Shows or updates configuration values.
     Config {
+        /// Configuration subcommand to run.
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Show a summary of indexed content and store usage
+    /// Shows a summary of indexed content and store usage.
     Stat,
-    /// Check store layout and status
+    /// Checks store layout and runtime dependencies.
     Doctor,
 }
 
+/// Configuration subcommands.
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {
-    /// Print the effective config for this store
+    /// Prints the effective configuration for the selected store.
     Show,
-    /// Set a config key in ~/.config/ragcli/<name>/config.toml
+    /// Sets a config key in `~/.config/ragcli/<name>/config.toml`.
     Set {
-        /// Config key such as models.embed or ollama.base_url
+        /// Configuration key such as `models.embed` or `ollama.base_url`.
         key: String,
-        /// New value to write
+        /// New value to write.
         value: String,
     },
 }

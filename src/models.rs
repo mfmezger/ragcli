@@ -1,3 +1,5 @@
+//! Clients for Ollama embedding, chat, and vision APIs.
+
 use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::Client;
@@ -5,24 +7,28 @@ use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
 
+/// Embedding client backed by Ollama's `/api/embed` endpoint.
 pub struct Embedder {
     client: Client,
     base_url: String,
     model: String,
 }
 
+/// Text generation client backed by Ollama's `/api/chat` endpoint.
 pub struct Generator {
     client: Client,
     base_url: String,
     model: String,
 }
 
+/// Vision captioning client that turns images into retrieval text.
 pub struct VisionCaptioner {
     client: Client,
     base_url: String,
     model: String,
 }
 
+/// Minimal Ollama API client used for health checks and model discovery.
 pub struct OllamaClient {
     client: Client,
     base_url: String,
@@ -54,6 +60,7 @@ struct TagModel {
 }
 
 impl OllamaClient {
+    /// Creates a new Ollama client for the given base URL.
     pub fn new(base_url: String) -> Self {
         Self {
             client: Client::builder()
@@ -64,6 +71,7 @@ impl OllamaClient {
         }
     }
 
+    /// Returns the installed model names reported by Ollama.
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
         let response = self
@@ -86,6 +94,7 @@ impl OllamaClient {
 }
 
 impl Embedder {
+    /// Creates a new embedding client.
     pub fn new(base_url: String, model: String) -> Self {
         Self {
             client: Client::builder()
@@ -97,6 +106,7 @@ impl Embedder {
         }
     }
 
+    /// Embeds a single text input and returns its vector.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let url = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
         let response = self
@@ -131,6 +141,7 @@ impl Embedder {
 }
 
 impl Generator {
+    /// Creates a new generation client.
     pub fn new(base_url: String, model: String) -> Self {
         Self {
             client: Client::builder()
@@ -142,6 +153,7 @@ impl Generator {
         }
     }
 
+    /// Generates an answer grounded in retrieved contexts.
     pub async fn generate_answer(
         &self,
         contexts: &[String],
@@ -190,6 +202,7 @@ impl Generator {
 }
 
 impl VisionCaptioner {
+    /// Creates a new vision captioning client.
     pub fn new(base_url: String, model: String) -> Self {
         Self {
             client: Client::builder()
@@ -201,6 +214,7 @@ impl VisionCaptioner {
         }
     }
 
+    /// Produces a retrieval-oriented caption for an image file.
     pub async fn caption_image(&self, image_path: &Path) -> Result<String> {
         let bytes = std::fs::read(image_path)
             .with_context(|| format!("read image: {}", image_path.display()))?;

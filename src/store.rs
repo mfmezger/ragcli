@@ -1,3 +1,5 @@
+//! LanceDB storage helpers and store metadata utilities.
+
 use anyhow::{bail, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -13,61 +15,99 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Default table name used for stored chunks.
 pub const DEFAULT_TABLE_NAME: &str = "chunks";
+/// Default column used for full-text search indexing.
 pub const DEFAULT_FTS_COLUMN: &str = "chunk_text";
 const STORE_SCHEMA_VERSION: u32 = 1;
 
+/// In-memory representation of a chunk before it is written to LanceDB.
 #[derive(Debug)]
 pub struct ChunkRow {
+    /// Stable row identifier.
     pub id: String,
+    /// Original source file path.
     pub source_path: String,
+    /// Chunk text stored for retrieval.
     pub chunk_text: String,
+    /// Stable content hash for the chunk.
     pub chunk_hash: String,
+    /// Page number for paginated sources, or `0` when not applicable.
     pub page: i32,
+    /// Zero-based chunk index within the source unit.
     pub chunk_index: i32,
+    /// JSON-encoded metadata associated with the chunk.
     pub metadata: String,
+    /// Embedding vector for semantic search.
     pub embedding: Vec<f32>,
 }
 
+/// Metadata recorded for a persisted store.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StoreMetadata {
+    /// Schema version of the on-disk metadata format.
     pub schema_version: u32,
+    /// Embedding model used to build the store.
     pub embed_model: String,
+    /// Embedding dimensionality stored in LanceDB.
     pub embedding_dim: usize,
+    /// Chunk size used during indexing.
     pub chunk_size: usize,
+    /// Chunk overlap used during indexing.
     pub chunk_overlap: usize,
 }
 
+/// Counts of source files by content kind.
 #[derive(Debug, Default)]
 pub struct ContentKindCounts {
+    /// Number of text or Markdown files.
     pub text_files: usize,
+    /// Number of PDF files.
     pub pdf_files: usize,
+    /// Number of image files.
     pub image_files: usize,
+    /// Number of files with other or unknown formats.
     pub other_files: usize,
 }
 
+/// Per-source chunk statistics.
 #[derive(Debug, Default)]
 pub struct SourceChunkStat {
+    /// Source file path.
     pub source_path: String,
+    /// Number of chunks stored for this source.
     pub chunks: usize,
+    /// Total characters stored for this source.
     pub chars: usize,
+    /// Approximate token count for this source.
     pub estimated_tokens: usize,
 }
 
+/// Aggregate statistics for a store.
 #[derive(Debug, Default)]
 pub struct StoreStats {
+    /// Total number of stored chunks.
     pub total_chunks: usize,
+    /// Number of unique source files.
     pub unique_sources: usize,
+    /// Number of unique PDF pages represented in the store.
     pub pdf_pages: usize,
+    /// Total characters stored across all chunks.
     pub total_chars: usize,
+    /// Approximate total token count across all chunks.
     pub estimated_tokens: usize,
+    /// Smallest chunk size in characters.
     pub min_chunk_chars: usize,
+    /// Largest chunk size in characters.
     pub max_chunk_chars: usize,
+    /// Counts of sources by content kind.
     pub content_kinds: ContentKindCounts,
+    /// Largest sources by chunk count.
     pub top_sources: Vec<SourceChunkStat>,
 }
 
 impl StoreMetadata {
+    /// Validates that a query is using the same embedding model as the store.
     pub fn validate_query_model(&self, embed_model: &str) -> Result<()> {
         if self.embed_model != embed_model {
             bail!(
@@ -80,6 +120,7 @@ impl StoreMetadata {
     }
 }
 
+/// Connects to the store's LanceDB database.
 pub async fn connect_db(store: &Path) -> Result<Connection> {
     let db_uri = store.join("lancedb").to_string_lossy().to_string();
     connect(&db_uri)
@@ -88,10 +129,12 @@ pub async fn connect_db(store: &Path) -> Result<Connection> {
         .context("connect to LanceDB")
 }
 
+/// Returns the path to the store metadata file.
 pub fn metadata_path(store: &Path) -> PathBuf {
     store.join("meta").join("store.toml")
 }
 
+/// Loads store metadata from disk.
 pub fn load_metadata(store: &Path) -> Result<StoreMetadata> {
     let path = metadata_path(store);
     let raw = fs::read_to_string(&path)
@@ -101,6 +144,7 @@ pub fn load_metadata(store: &Path) -> Result<StoreMetadata> {
     Ok(metadata)
 }
 
+/// Ensures store metadata exists and matches the current indexing settings.
 pub fn ensure_metadata(
     store: &Path,
     embed_model: &str,
@@ -137,6 +181,7 @@ pub fn ensure_metadata(
     Ok(())
 }
 
+/// Replaces all rows for the provided source paths and inserts fresh rows.
 pub async fn replace_source_rows(
     db: &Connection,
     rows: &[ChunkRow],
@@ -161,6 +206,7 @@ pub async fn replace_source_rows(
     Ok(())
 }
 
+/// Ensures the full-text search index exists for the default text column.
 pub async fn ensure_fts_index(table: &Table, replace: bool) -> Result<()> {
     let has_fts = table.list_indices().await?.into_iter().any(|index| {
         index.index_type == IndexType::FTS
@@ -250,6 +296,7 @@ fn build_record_batch(schema: Arc<Schema>, rows: &[ChunkRow]) -> Result<RecordBa
     )?)
 }
 
+/// Extracts retrieval contexts from query result batches.
 pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for batch in batches {
@@ -276,6 +323,7 @@ pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Collects summary statistics from stored chunk batches.
 pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<StoreStats> {
     let mut stats = StoreStats::default();
     let mut source_stats: BTreeMap<String, SourceChunkStat> = BTreeMap::new();
@@ -364,6 +412,7 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
     Ok(stats)
 }
 
+/// Removes a single `<think>...</think>` block from a model response when present.
 pub fn strip_thinking(text: &str) -> String {
     if let Some(start) = text.find("<think>") {
         let end = text.find("</think>");

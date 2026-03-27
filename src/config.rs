@@ -1,3 +1,5 @@
+//! Configuration loading, persistence, and environment overrides.
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -10,34 +12,47 @@ pub const ENV_EMBED_MODEL: &str = "RAGCLI_EMBED_MODEL";
 pub const ENV_CHAT_MODEL: &str = "RAGCLI_CHAT_MODEL";
 pub const ENV_VISION_MODEL: &str = "RAGCLI_VISION_MODEL";
 
+/// Runtime configuration for a single store.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// Model names used for embedding, chat, and vision tasks.
     #[serde(default)]
     pub models: ModelsConfig,
+    /// Ollama connection settings.
     #[serde(default)]
     pub ollama: OllamaConfig,
+    /// Chunking settings used during indexing.
     #[serde(default)]
     pub chunk: ChunkConfig,
 }
 
+/// Model configuration values.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
+    /// Embedding model name.
     pub embed: String,
+    /// Chat model name.
     pub chat: String,
+    /// Vision-capable model name.
     pub vision: String,
 }
 
+/// Ollama connection settings.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OllamaConfig {
+    /// Base URL for the Ollama server.
     pub base_url: String,
 }
 
+/// Chunking settings used during indexing.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChunkConfig {
+    /// Target chunk size in characters.
     pub size: usize,
+    /// Overlap between adjacent chunks in characters.
     pub overlap: usize,
 }
 
@@ -78,17 +93,25 @@ impl Default for Config {
     }
 }
 
+/// Indicates where a resolved config value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigValueSource {
+    /// The value came from the store config file.
     File,
+    /// The value came from the named environment variable.
     Env(&'static str),
 }
 
+/// Tracks the source of config values after environment overrides are applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigSources {
+    /// Source of `ollama.base_url`.
     pub ollama_base_url: ConfigValueSource,
+    /// Source of `models.embed`.
     pub models_embed: ConfigValueSource,
+    /// Source of `models.chat`.
     pub models_chat: ConfigValueSource,
+    /// Source of `models.vision`.
     pub models_vision: ConfigValueSource,
 }
 
@@ -104,6 +127,7 @@ impl Default for ConfigSources {
 }
 
 impl ConfigSources {
+    /// Returns human-readable descriptions of active environment overrides.
     pub fn overrides(&self) -> Vec<String> {
         let mut overrides = Vec::new();
         if let ConfigValueSource::Env(var) = self.ollama_base_url {
@@ -122,20 +146,24 @@ impl ConfigSources {
     }
 }
 
+/// Returns the base configuration directory for `ragcli`.
 pub fn base_dir() -> Result<PathBuf> {
     let xdg_dirs = xdg::BaseDirectories::with_prefix("ragcli")?;
     Ok(xdg_dirs.get_config_home())
 }
 
+/// Returns the directory for a named store, or the default store when omitted.
 pub fn store_dir(name: Option<&str>) -> Result<PathBuf> {
     let store_name = name.unwrap_or(DEFAULT_STORE_NAME);
     Ok(base_dir()?.join(store_name))
 }
 
+/// Returns the path to the store's `config.toml` file.
 pub fn config_path(store: &Path) -> PathBuf {
     store.join("config.toml")
 }
 
+/// Ensures the on-disk directory layout for a store exists.
 pub fn ensure_store_layout(store: &Path) -> Result<()> {
     fs::create_dir_all(store.join("lancedb"))?;
     fs::create_dir_all(store.join("meta"))?;
@@ -144,6 +172,7 @@ pub fn ensure_store_layout(store: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Loads the store config from disk, creating a default file when needed.
 pub fn load_or_create_file_config(store: &Path) -> Result<Config> {
     let path = config_path(store);
     if path.exists() {
@@ -158,30 +187,38 @@ pub fn load_or_create_file_config(store: &Path) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Writes a config file for the given store.
 pub fn save_config(store: &Path, cfg: &Config) -> Result<()> {
     let raw = toml::to_string_pretty(cfg)?;
     fs::write(config_path(store), raw)?;
     Ok(())
 }
 
+/// Loads the effective config after applying environment overrides.
 pub fn load_or_create_config(store: &Path) -> Result<Config> {
     Ok(load_or_create_file_config(store)?.apply_env_overrides())
 }
 
+/// Loads the effective config together with the source of each resolved value.
 pub fn load_or_create_config_with_sources(store: &Path) -> Result<(Config, ConfigSources)> {
     let cfg = load_or_create_file_config(store)?;
     Ok(cfg.apply_env_overrides_with_sources())
 }
 
+/// Resolves a model name for runtime use.
+///
+/// This currently returns the configured model name unchanged.
 pub fn resolve_model_name(_store: &Path, model: &str) -> String {
     model.to_string()
 }
 
 impl Config {
+    /// Applies environment variable overrides to the config.
     pub fn apply_env_overrides(self) -> Self {
         self.apply_env_overrides_with_sources().0
     }
 
+    /// Applies environment variable overrides and returns the source of each value.
     pub fn apply_env_overrides_with_sources(mut self) -> (Self, ConfigSources) {
         let mut sources = ConfigSources::default();
 
@@ -205,6 +242,7 @@ impl Config {
         (self, sources)
     }
 
+    /// Updates a supported config key from a dotted path and string value.
     pub fn set_path(&mut self, key: &str, value: &str) -> Result<()> {
         match key {
             "ollama.base_url" => self.ollama.base_url = value.to_string(),
@@ -222,6 +260,7 @@ impl Config {
     }
 }
 
+/// Normalizes chunk settings so they remain valid for indexing.
 pub fn normalize_chunk_settings(size: usize, overlap: usize) -> (usize, usize) {
     if size == 0 {
         return (1, 0);
@@ -233,6 +272,7 @@ pub fn normalize_chunk_settings(size: usize, overlap: usize) -> (usize, usize) {
     (size, overlap)
 }
 
+/// Formats a simple existence status string.
 pub fn status(exists: bool) -> &'static str {
     if exists {
         "exists"
