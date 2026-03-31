@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use walkdir::WalkDir;
 
 /// Aggregated indexing counters for a single ingest run.
@@ -51,6 +52,12 @@ struct ChunkContent {
     metadata: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfParser {
+    Native,
+    Liteparse,
+}
+
 /// Walks a file or directory, extracts supported content, and returns chunk rows.
 pub async fn ingest_path(
     path: &Path,
@@ -58,6 +65,7 @@ pub async fn ingest_path(
     overlap: usize,
     embedder: &Embedder,
     vision: Option<&VisionCaptioner>,
+    pdf_parser: PdfParser,
 ) -> Result<IngestResult> {
     let files = collect_files(path)?;
     let progress = build_progress_bar(files.len() as u64);
@@ -125,9 +133,7 @@ pub async fn ingest_path(
             FileKind::Pdf => {
                 source_paths.insert(file.display().to_string());
                 progress.set_message(format!("Extracting {}", display_name(&file)));
-                match extract_text_by_pages(&file)
-                    .with_context(|| format!("extract pdf text: {}", file.display()))
-                {
+                match extract_pdf_pages(&file, pdf_parser) {
                     Ok(pages) => {
                         let mut file_rows = Vec::new();
                         let mut file_failed = None;
@@ -287,6 +293,75 @@ fn file_kind(path: &Path) -> FileKind {
 fn load_text_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn extract_pdf_pages(path: &Path, parser: PdfParser) -> Result<Vec<String>> {
+    match parser {
+        PdfParser::Native => extract_text_by_pages(path)
+            .with_context(|| format!("extract pdf text: {}", path.display())),
+        PdfParser::Liteparse => extract_pdf_pages_with_liteparse(path),
+    }
+}
+
+fn extract_pdf_pages_with_liteparse(path: &Path) -> Result<Vec<String>> {
+    let output = Command::new("lit")
+        .arg("parse")
+        .arg(path)
+        .arg("--format")
+        .arg("json")
+        .arg("--quiet")
+        .output()
+        .with_context(|| {
+            format!(
+                "run liteparse CLI (`lit parse`) for {}",
+                path.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "liteparse failed for {}: {}",
+            path.display(),
+            stderr.trim()
+        );
+    }
+
+    parse_liteparse_pages(&output.stdout)
+        .with_context(|| format!("parse liteparse output for {}", path.display()))
+}
+
+fn parse_liteparse_pages(bytes: &[u8]) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_slice(bytes).context("decode liteparse JSON")?;
+    if let Some(pages) = value.get("pages").and_then(Value::as_array) {
+        let extracted = pages
+            .iter()
+            .filter_map(|page| page.get("text").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !extracted.is_empty() {
+            return Ok(extracted);
+        }
+    }
+
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        let pages = split_liteparse_text_pages(text);
+        if !pages.is_empty() {
+            return Ok(pages);
+        }
+    }
+
+    anyhow::bail!("liteparse output did not contain page text")
+}
+
+fn split_liteparse_text_pages(text: &str) -> Vec<String> {
+    text.split('\u{c}')
+        .map(str::trim)
+        .filter(|page| !page.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn build_progress_bar(total_files: u64) -> ProgressBar {
@@ -771,5 +846,28 @@ mod tests {
         let text = load_text_file(&path).unwrap();
         assert!(text.contains('f'));
         assert!(text.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn test_parse_liteparse_pages_from_pages_array() {
+        let json = br#"{
+            "pages": [
+                {"page": 1, "text": "First page"},
+                {"page": 2, "text": "Second page"}
+            ]
+        }"#;
+
+        let pages = parse_liteparse_pages(json).unwrap();
+        assert_eq!(pages, vec!["First page", "Second page"]);
+    }
+
+    #[test]
+    fn test_parse_liteparse_pages_from_form_feed_text() {
+        let json = br#"{
+            "text": "First page\fSecond page"
+        }"#;
+
+        let pages = parse_liteparse_pages(json).unwrap();
+        assert_eq!(pages, vec!["First page", "Second page"]);
     }
 }

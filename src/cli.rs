@@ -1,7 +1,14 @@
 //! Command-line interface definitions for `ragcli`.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// PDF extraction backend used during indexing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PdfParserArg {
+    Native,
+    Liteparse,
+}
 
 /// Top-level CLI arguments.
 #[derive(Parser, Debug)]
@@ -32,6 +39,9 @@ pub enum Command {
         /// Overrides the embedding model name.
         #[arg(long)]
         embed_model: Option<String>,
+        /// Selects the PDF parser used for `.pdf` inputs.
+        #[arg(long, value_enum)]
+        pdf_parser: Option<PdfParserArg>,
     },
     /// Queries the local store and generates an answer.
     Query {
