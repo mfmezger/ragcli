@@ -6,14 +6,14 @@ mod store;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cli::{Cli, Command, ConfigCommand};
+use cli::{Cli, Command, ConfigCommand, PdfParserArg};
 use config::{
     ensure_store_layout, load_or_create_config, load_or_create_config_with_sources,
     load_or_create_file_config, normalize_chunk_settings, resolve_model_name, save_config, status,
     store_dir,
 };
 use futures::TryStreamExt;
-use ingest::ingest_path;
+use ingest::{ingest_path, PdfParser};
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use models::{Embedder, Generator, OllamaClient, VisionCaptioner};
@@ -37,7 +37,10 @@ async fn main() -> Result<()> {
             chunk_size,
             chunk_overlap,
             embed_model,
-        } => cmd_index(name, path, chunk_size, chunk_overlap, embed_model).await?,
+            pdf_parser,
+        } => {
+            cmd_index(name, path, chunk_size, chunk_overlap, embed_model, pdf_parser).await?
+        }
         Command::Query {
             question,
             top_k,
@@ -62,6 +65,7 @@ async fn cmd_index(
     chunk_size: Option<usize>,
     chunk_overlap: Option<usize>,
     embed_model: Option<String>,
+    pdf_parser: Option<PdfParserArg>,
 ) -> Result<()> {
     let started = Instant::now();
     let store = store_dir(name)?;
@@ -80,7 +84,18 @@ async fn cmd_index(
         cfg.ollama.base_url.clone(),
         resolve_model_name(&store, &cfg.models.vision),
     );
-    let result = ingest_path(&path, size, overlap, &embedder, Some(&vision)).await?;
+    let result = ingest_path(
+        &path,
+        size,
+        overlap,
+        &embedder,
+        Some(&vision),
+        match pdf_parser.unwrap_or(PdfParserArg::Native) {
+            PdfParserArg::Native => PdfParser::Native,
+            PdfParserArg::Liteparse => PdfParser::Liteparse,
+        },
+    )
+    .await?;
 
     if let Some(dim) = result.embedding_dim {
         ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
