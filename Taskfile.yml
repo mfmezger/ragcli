@@ -21,6 +21,16 @@ tasks:
     cmds:
       - cargo test
 
+  changelog:
+    desc: Generate CHANGELOG.md with git-cliff
+    cmds:
+      - git-cliff -o CHANGELOG.md
+
+  changelog-preview:
+    desc: Preview unreleased changelog output
+    cmds:
+      - git-cliff --unreleased
+
   release:
     desc: Run cargo-release in dry-run mode
     cmds:

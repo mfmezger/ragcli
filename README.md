@@ -154,6 +154,7 @@ If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](
 task build
 task check
 task test
+task changelog
 task release -- patch
 task fmt
 task doctor
@@ -171,6 +172,7 @@ Releases are configured with `cargo-release` through [`Cargo.toml`](Cargo.toml).
 
 - only release from `main`
 - create tags as `v<version>`
+- regenerate [`CHANGELOG.md`](CHANGELOG.md) with [`git-cliff`](https://git-cliff.org/) before the release commit
 - default to `cargo release` dry runs unless you pass `--execute`
 - skip crates.io publishing for now
 
@@ -178,6 +180,8 @@ Typical usage:
 
 ```bash
 cargo install cargo-release
+cargo install git-cliff
+git-cliff -o CHANGELOG.md
 cargo release patch
 cargo release patch --execute
 ```
