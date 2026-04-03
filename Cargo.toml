@@ -27,4 +27,6 @@ arrow-array = "57"
 arrow-schema = "57"
 
 [dev-dependencies]
+reqwest-middleware = "0.4"
+reqwest-vcr = { version = "0.4", default-features = false, features = ["reqwest-0_12"] }
 tempfile = "3"

@@ -1,0 +1,27 @@
+{
+  "http_interactions": [
+    {
+      "request": {
+        "uri": "http://ollama.test/api/chat",
+        "body": "{\"messages\":[{\"content\":\"You are a helpful assistant. Use the provided context to answer the question. If the answer is not in the context, say you don't know. Respond with only the final answer and no chain-of-thought.\",\"role\":\"system\"},{\"content\":\"Context:\\nA cat sits on a windowsill.\\n\\n\\nQuestion: What animal is described?\",\"role\":\"user\"}],\"model\":\"llama3.2\",\"options\":{\"num_predict\":64},\"stream\":false,\"think\":false}",
+        "method": "post",
+        "headers": {}
+      },
+      "response": {
+        "body": "{\"message\":{\"content\":\"A cat sits on a windowsill.\"}}",
+        "http_version": "1.1",
+        "status": {
+          "code": 200,
+          "message": "OK"
+        },
+        "headers": {
+          "Content-Type": [
+            "application/json"
+          ]
+        }
+      },
+      "recorded_at": "Wed, 02 Apr 2025 00:00:00 GMT"
+    }
+  ],
+  "recorded_with": "rVCR 0.4.0"
+}
