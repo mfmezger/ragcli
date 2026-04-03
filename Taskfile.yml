@@ -1,0 +1,67 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the CLI
+    cmds:
+      - cargo build
+
+  check:
+    desc: Run cargo check
+    cmds:
+      - cargo check
+
+  test:
+    desc: Run cargo test
+    cmds:
+      - cargo test
+
+  release:
+    desc: Run cargo-release in dry-run mode
+    cmds:
+      - cargo release {{.CLI_ARGS}}
+
+  release-execute:
+    desc: Run cargo-release and execute the release
+    cmds:
+      - cargo release {{.CLI_ARGS}} --execute
+
+  fmt:
+    desc: Verify formatting with rustfmt
+    cmds:
+      - cargo fmt -- --check
+
+  doctor:
+    desc: Run the local environment and store health checks
+    cmds:
+      - cargo run -- doctor {{.CLI_ARGS}}
+
+  stat:
+    desc: Show local store statistics
+    cmds:
+      - cargo run -- stat {{.CLI_ARGS}}
+
+  index:
+    desc: Index a file or directory
+    cmds:
+      - cargo run -- index {{.CLI_ARGS}}
+
+  query:
+    desc: Query the indexed store
+    cmds:
+      - cargo run -- query {{.CLI_ARGS}}
+
+  config-show:
+    desc: Show effective config
+    cmds:
+      - cargo run -- config show {{.CLI_ARGS}}
+
+  config-set:
+    desc: Set a config key and value
+    cmds:
+      - cargo run -- config set {{.CLI_ARGS}}

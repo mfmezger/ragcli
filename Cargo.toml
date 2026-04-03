@@ -5,6 +5,16 @@ edition = "2021"
 
 description = "CLI for local RAG (storage layout + plumbing)"
 
+[package.metadata.release]
+allow-branch = ["main"]
+sign-commit = false
+sign-tag = false
+push = true
+publish = false
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"
+pre-release-commit-message = "release: {{version}}"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
@@ -27,4 +37,6 @@ arrow-array = "57"
 arrow-schema = "57"
 
 [dev-dependencies]
+reqwest-middleware = "0.4"
+reqwest-vcr = { version = "0.4", default-features = false, features = ["reqwest-0_12"] }
 tempfile = "3"

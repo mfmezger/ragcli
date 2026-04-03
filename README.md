@@ -147,3 +147,37 @@ Verify:
 cargo check
 cargo test
 ```
+
+If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](Taskfile.yml) with shortcuts for the common workflows:
+
+```bash
+task build
+task check
+task test
+task release -- patch
+task fmt
+task doctor
+task stat
+```
+
+Task arguments can be forwarded to CLI tasks with `--`, for example:
+
+```bash
+task index -- ./docs
+task query -- "What is this project about?"
+```
+
+Releases are configured with `cargo-release` through [`Cargo.toml`](Cargo.toml). The repository is set up to:
+
+- only release from `main`
+- create tags as `v<version>`
+- default to `cargo release` dry runs unless you pass `--execute`
+- skip crates.io publishing for now
+
+Typical usage:
+
+```bash
+cargo install cargo-release
+cargo release patch
+cargo release patch --execute
+```
