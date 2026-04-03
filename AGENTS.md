@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`ragcli` is a small Rust CLI with all application code under `src/`. [`src/main.rs`](/Users/mfm/Projects/ragcli/src/main.rs) wires the CLI commands together, [`src/cli.rs`](/Users/mfm/Projects/ragcli/src/cli.rs) defines the Clap interface, [`src/ingest.rs`](/Users/mfm/Projects/ragcli/src/ingest.rs) handles file discovery and chunking, [`src/store.rs`](/Users/mfm/Projects/ragcli/src/store.rs) manages LanceDB persistence, [`src/models.rs`](/Users/mfm/Projects/ragcli/src/models.rs) wraps Ollama calls, and [`src/config.rs`](/Users/mfm/Projects/ragcli/src/config.rs) owns store configuration. GitHub Actions workflows live under [`.github/workflows/`](/Users/mfm/Projects/ragcli/.github/workflows/). Sample assets such as `example.png` and `My_Neighbor_Totoro.pdf` are local fixtures, not library code. Recorded HTTP fixtures for replay tests live under [`tests/cassettes/`](/Users/mfm/Projects/ragcli/tests/cassettes/).
+`ragcli` is a small Rust CLI with all application code under `src/`. [`src/main.rs`](/Users/mfm/Projects/ragcli/src/main.rs) wires the CLI commands together, [`src/cli.rs`](/Users/mfm/Projects/ragcli/src/cli.rs) defines the Clap interface, [`src/ingest.rs`](/Users/mfm/Projects/ragcli/src/ingest.rs) handles file discovery and chunking, [`src/store.rs`](/Users/mfm/Projects/ragcli/src/store.rs) manages LanceDB persistence, [`src/models.rs`](/Users/mfm/Projects/ragcli/src/models.rs) wraps Ollama calls, and [`src/config.rs`](/Users/mfm/Projects/ragcli/src/config.rs) owns store configuration. GitHub Actions workflows live under [`.github/workflows/`](/Users/mfm/Projects/ragcli/.github/workflows/). Local Task automation lives in [`Taskfile.yml`](/Users/mfm/Projects/ragcli/Taskfile.yml). Sample assets such as `example.png` and `My_Neighbor_Totoro.pdf` are local fixtures, not library code. Recorded HTTP fixtures for replay tests live under [`tests/cassettes/`](/Users/mfm/Projects/ragcli/tests/cassettes/).
 
 ## Build, Test, and Development Commands
 Use standard Cargo commands from the repo root:
@@ -13,6 +13,15 @@ Use standard Cargo commands from the repo root:
 - `cargo check` validates the code quickly without producing a release binary.
 - `cargo test` runs the unit tests.
 - `cargo fmt -- --check` verifies formatting before review.
+
+Equivalent `Task` shortcuts are available in [`Taskfile.yml`](/Users/mfm/Projects/ragcli/Taskfile.yml):
+
+- `task build`
+- `task check`
+- `task test`
+- `task fmt`
+- `task doctor`
+- `task stat`
 
 ## Coding Style & Naming Conventions
 Follow idiomatic Rust and let `rustfmt` own formatting. Use 4-space indentation, `snake_case` for functions, variables, and modules, and `CamelCase` for structs and enums. Keep modules focused on one responsibility and prefer small helpers over deeply nested logic. This project already uses `anyhow::Result` for fallible flows and `clap` derives for CLI arguments; stay consistent with those patterns.

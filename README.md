@@ -147,3 +147,21 @@ Verify:
 cargo check
 cargo test
 ```
+
+If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](/Users/mfm/Projects/ragcli/Taskfile.yml) with shortcuts for the common workflows:
+
+```bash
+task build
+task check
+task test
+task fmt
+task doctor
+task stat
+```
+
+Task arguments can be forwarded to CLI tasks with `--`, for example:
+
+```bash
+task index -- ./docs
+task query -- "What is this project about?"
+```
