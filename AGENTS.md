@@ -19,9 +19,12 @@ Equivalent `Task` shortcuts are available in [`Taskfile.yml`](Taskfile.yml):
 - `task build`
 - `task check`
 - `task test`
+- `task release -- patch`
 - `task fmt`
 - `task doctor`
 - `task stat`
+
+Releases are managed with `cargo-release` via the `[package.metadata.release]` config in [`Cargo.toml`](Cargo.toml). Use dry runs by default and only release from `main`.
 
 ## Coding Style & Naming Conventions
 Follow idiomatic Rust and let `rustfmt` own formatting. Use 4-space indentation, `snake_case` for functions, variables, and modules, and `CamelCase` for structs and enums. Keep modules focused on one responsibility and prefer small helpers over deeply nested logic. This project already uses `anyhow::Result` for fallible flows and `clap` derives for CLI arguments; stay consistent with those patterns.

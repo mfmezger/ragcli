@@ -21,6 +21,16 @@ tasks:
     cmds:
       - cargo test
 
+  release:
+    desc: Run cargo-release in dry-run mode
+    cmds:
+      - cargo release {{.CLI_ARGS}}
+
+  release-execute:
+    desc: Run cargo-release and execute the release
+    cmds:
+      - cargo release {{.CLI_ARGS}} --execute
+
   fmt:
     desc: Verify formatting with rustfmt
     cmds:
