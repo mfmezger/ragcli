@@ -148,7 +148,7 @@ cargo check
 cargo test
 ```
 
-If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](/Users/mfm/Projects/ragcli/Taskfile.yml) with shortcuts for the common workflows:
+If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](Taskfile.yml) with shortcuts for the common workflows:
 
 ```bash
 task build
