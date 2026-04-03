@@ -14,7 +14,7 @@ publish = false
 tag-name = "v{{version}}"
 tag-message = "Release {{version}}"
 pre-release-commit-message = "release: {{version}}"
-pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md"]
+pre-release-hook = ["git-cliff", "--tag", "v{{version}}", "-o", "CHANGELOG.md"]
 
 [dependencies]
 anyhow = "1"

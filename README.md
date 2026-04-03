@@ -181,7 +181,6 @@ Typical usage:
 ```bash
 cargo install cargo-release
 cargo install git-cliff
-git-cliff -o CHANGELOG.md
 cargo release patch
 cargo release patch --execute
 ```
