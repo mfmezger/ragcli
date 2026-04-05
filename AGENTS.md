@@ -1,15 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`ragcli` is a small Rust CLI with all application code under `src/`. [`src/main.rs`](src/main.rs) wires the CLI commands together, [`src/cli.rs`](src/cli.rs) defines the Clap interface, [`src/ingest.rs`](src/ingest.rs) handles file discovery and chunking, [`src/store.rs`](src/store.rs) manages LanceDB persistence, [`src/models.rs`](src/models.rs) wraps Ollama calls, and [`src/config.rs`](src/config.rs) owns store configuration. GitHub Actions workflows live under [`.github/workflows/`](.github/workflows/). Local Task automation lives in [`Taskfile.yml`](Taskfile.yml). Sample assets such as `example.png` and `My_Neighbor_Totoro.pdf` are local fixtures, not library code. Recorded HTTP fixtures for replay tests live under [`tests/cassettes/`](tests/cassettes/).
+`ragcli` is a small Rust CLI with all application code under `src/`. [`src/main.rs`](src/main.rs) wires the CLI commands together, [`src/cli.rs`](src/cli.rs) defines the Clap interface, [`src/ingest.rs`](src/ingest.rs) handles file discovery, PDF parsing, and chunking, [`src/store.rs`](src/store.rs) manages LanceDB persistence and retrieval helpers, [`src/models.rs`](src/models.rs) wraps Ollama embedding, generation, and vision calls, and [`src/config.rs`](src/config.rs) owns store configuration and model resolution. GitHub Actions workflows live under [`.github/workflows/`](.github/workflows/). Local Task automation lives in [`Taskfile.yml`](Taskfile.yml). Sample assets such as `example.png` and `My_Neighbor_Totoro.pdf` are local fixtures, not library code. Recorded HTTP fixtures for replay tests live under [`tests/cassettes/`](tests/cassettes/).
 
 ## Build, Test, and Development Commands
 Use standard Cargo commands from the repo root:
 
 - `cargo build` builds the CLI.
 - `cargo run -- doctor` checks local store layout and Ollama availability.
+- `cargo run -- stat` shows indexed-content and disk-usage summaries for the current store.
 - `cargo run -- index ./docs` indexes a file or directory into the default store.
+- `cargo run -- index ./docs --pdf-parser liteparse` indexes using the alternate PDF parser.
 - `cargo run -- query "What is this project about?"` runs retrieval and generation.
+- `cargo run -- config show` prints the effective config for the selected store.
+- `cargo run -- config set models.chat llama3.2` updates a config key in the selected store.
 - `cargo check` validates the code quickly without producing a release binary.
 - `cargo test` runs the unit tests.
 - `cargo fmt -- --check` verifies formatting before review.
@@ -20,10 +24,18 @@ Equivalent `Task` shortcuts are available in [`Taskfile.yml`](Taskfile.yml):
 - `task check`
 - `task test`
 - `task changelog`
+- `task changelog-preview`
 - `task release -- patch`
+- `task release-execute -- patch`
 - `task fmt`
 - `task doctor`
 - `task stat`
+- `task index -- ./docs`
+- `task query -- "What is this project about?"`
+- `task config-show`
+- `task config-set -- models.chat llama3.2`
+
+Use the global `--name <store>` flag with Cargo commands when working with a non-default store, for example `cargo run -- --name scratch stat`.
 
 Releases are managed with `cargo-release` via the `[package.metadata.release]` config in [`Cargo.toml`](Cargo.toml). Changelogs are generated with [`git-cliff`](https://git-cliff.org/) using [`cliff.toml`](cliff.toml) and written to [`CHANGELOG.md`](CHANGELOG.md). Use dry runs by default and only release from `main`.
 
