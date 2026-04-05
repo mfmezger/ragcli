@@ -424,4 +424,64 @@ overlap = 200
             }
         }
     }
+
+    #[test]
+    fn test_config_sources_overrides_formats_only_env_values() {
+        let sources = ConfigSources {
+            ollama_base_url: ConfigValueSource::Env(ENV_OLLAMA_URL),
+            models_embed: ConfigValueSource::File,
+            models_chat: ConfigValueSource::Env(ENV_CHAT_MODEL),
+            models_vision: ConfigValueSource::File,
+        };
+
+        assert_eq!(
+            sources.overrides(),
+            vec![
+                format!("ollama.base_url <- {}", ENV_OLLAMA_URL),
+                format!("models.chat <- {}", ENV_CHAT_MODEL),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_ensure_store_layout_creates_expected_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+
+        ensure_store_layout(&store).unwrap();
+
+        assert!(store.join("lancedb").exists());
+        assert!(store.join("meta").exists());
+        assert!(store.join("cache").exists());
+        assert!(store.join("models").exists());
+    }
+
+    #[test]
+    fn test_save_config_persists_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.models.chat = "chat-updated".to_string();
+        cfg.chunk.size = 256;
+        save_config(&store, &cfg).unwrap();
+
+        let reloaded = load_or_create_file_config(&store).unwrap();
+        assert_eq!(reloaded.models.chat, "chat-updated");
+        assert_eq!(reloaded.chunk.size, 256);
+    }
+
+    #[test]
+    fn test_set_path_rejects_unknown_key() {
+        let mut cfg = Config::default();
+        let err = cfg.set_path("models.unknown", "x").unwrap_err().to_string();
+        assert!(err.contains("unknown config key"));
+    }
+
+    #[test]
+    fn test_status_reports_exists_and_missing() {
+        assert_eq!(status(true), "exists");
+        assert_eq!(status(false), "missing");
+    }
 }

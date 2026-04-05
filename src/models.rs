@@ -315,6 +315,9 @@ mod tests {
     use super::*;
     use reqwest_middleware::ClientBuilder;
     use reqwest_vcr::{VCRMiddleware, VCRMode};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn replay_client(cassette_name: &str) -> ClientWithMiddleware {
         let cassette = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -331,6 +334,83 @@ mod tests {
         ClientBuilder::new(reqwest::Client::new())
             .with(middleware)
             .build()
+    }
+
+    fn one_shot_server(status_line: &str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().unwrap();
+        let status_line = status_line.to_string();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status_line,
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("write response");
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn test_build_user_prompt_includes_all_contexts() {
+        let prompt = build_user_prompt(&["First".to_string(), "Second".to_string()], "Why?");
+        assert!(prompt.contains("Context:"));
+        assert!(prompt.contains("First\n\nSecond"));
+        assert!(prompt.ends_with("Question: Why?"));
+    }
+
+    #[tokio::test]
+    async fn test_list_models_success() {
+        let base_url = one_shot_server(
+            "200 OK",
+            r#"{"models":[{"name":"embed-x"},{"name":"chat-y"}]}"#,
+        );
+
+        let client = OllamaClient::new(base_url);
+        let models = client.list_models().await.unwrap();
+        assert_eq!(models, vec!["embed-x", "chat-y"]);
+    }
+
+    #[tokio::test]
+    async fn test_embed_success() {
+        let base_url = one_shot_server(
+            "200 OK",
+            r#"{"embeddings":[[0.25,0.5,0.75]]}"#,
+        );
+
+        let embedder = Embedder::new(base_url, "embed-model".to_string());
+        let embedding = embedder.embed("hello").await.unwrap();
+        assert_eq!(embedding, vec![0.25, 0.5, 0.75]);
+    }
+
+    #[tokio::test]
+    async fn test_embed_errors_when_response_has_no_embedding() {
+        let base_url = one_shot_server("200 OK", r#"{"embeddings":[]}"#);
+
+        let embedder = Embedder::new(base_url, "embed-model".to_string());
+        let err = embedder.embed("hello").await.unwrap_err().to_string();
+        assert!(err.contains("did not include an embedding"));
+    }
+
+    #[tokio::test]
+    async fn test_caption_image_success() {
+        let base_url = one_shot_server(
+            "200 OK",
+            r#"{"message":{"content":"A small orange cat."}}"#,
+        );
+        let captioner = VisionCaptioner::new(base_url, "vision-model".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("cat.png");
+        std::fs::write(&image, b"not-a-real-png").unwrap();
+
+        let caption = captioner.caption_image(&image).await.unwrap();
+        assert_eq!(caption, "A small orange cat.");
     }
 
     #[tokio::test]

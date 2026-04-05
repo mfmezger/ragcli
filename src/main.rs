@@ -426,3 +426,175 @@ fn fmt_count(value: usize) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
+    use std::thread;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    async fn with_test_env<T, F>(config_home: &Path, ollama_url: Option<&str>, f: impl FnOnce() -> F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let _guard = env_lock().lock().unwrap();
+        let previous_xdg = env::var_os("XDG_CONFIG_HOME");
+        let previous_ollama = env::var_os(config::ENV_OLLAMA_URL);
+
+        unsafe {
+            env::set_var("XDG_CONFIG_HOME", config_home);
+            match ollama_url {
+                Some(url) => env::set_var(config::ENV_OLLAMA_URL, url),
+                None => env::remove_var(config::ENV_OLLAMA_URL),
+            }
+        }
+
+        let result = f().await;
+
+        unsafe {
+            match previous_xdg {
+                Some(value) => env::set_var("XDG_CONFIG_HOME", value),
+                None => env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match previous_ollama {
+                Some(value) => env::set_var(config::ENV_OLLAMA_URL, value),
+                None => env::remove_var(config::ENV_OLLAMA_URL),
+            }
+        }
+
+        result
+    }
+
+    fn sequential_json_server(bodies: Vec<&'static str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            for body in bodies {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).expect("write response");
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn test_dir_size_bytes_for_missing_file_file_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        let nested = dir.path().join("nested");
+        let nested_file = nested.join("b.txt");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&file, b"abc").unwrap();
+        std::fs::write(&nested_file, b"12345").unwrap();
+
+        assert_eq!(dir_size_bytes(&dir.path().join("missing")).unwrap(), 0);
+        assert_eq!(dir_size_bytes(&file).unwrap(), 3);
+        assert_eq!(dir_size_bytes(dir.path()).unwrap(), 8);
+    }
+
+    #[test]
+    fn test_fmt_bytes_and_fmt_count() {
+        assert_eq!(fmt_bytes(999), "999 B");
+        assert_eq!(fmt_bytes(2048), "2.0 KB");
+        assert_eq!(fmt_count(12), "12");
+        assert_eq!(fmt_count(1234), "1,234");
+        assert_eq!(fmt_count(1234567), "1,234,567");
+    }
+
+    #[tokio::test]
+    async fn test_cmd_config_set_and_show_succeed_for_named_store() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            cmd_config_set(Some("test-store"), "models.chat".to_string(), "chat-z".to_string())
+                .await
+                .unwrap();
+            cmd_config_show(Some("test-store")).await.unwrap();
+
+            let store = store_dir(Some("test-store")).unwrap();
+            let cfg = load_or_create_file_config(&store).unwrap();
+            assert_eq!(cfg.models.chat, "chat-z");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_cmd_stat_and_doctor_succeed_on_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            cmd_stat(Some("empty")).await.unwrap();
+            cmd_doctor(Some("empty")).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_cmd_doctor_succeeds_with_reachable_mock_ollama() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = sequential_json_server(vec![r#"{"models":[{"name":"nomic-embed-text-v2-moe:latest"},{"name":"qwen3.5:4b"}]}"#]);
+
+        with_test_env(dir.path(), Some(&server), || async {
+            cmd_doctor(Some("reachable")).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_cmd_index_and_query_succeed_with_mock_ollama() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let input = docs.join("note.txt");
+        std::fs::write(&input, "The project is a local RAG CLI.").unwrap();
+
+        let index_server = sequential_json_server(vec![r#"{"embeddings":[[0.1,0.2]]}"#]);
+        with_test_env(dir.path(), Some(&index_server), || async {
+            cmd_index(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            cmd_stat(Some("e2e")).await.unwrap();
+        })
+        .await;
+
+        let query_server = sequential_json_server(vec![
+            r#"{"embeddings":[[0.1,0.2]]}"#,
+            r#"{"message":{"content":"ragcli is a local RAG CLI."}}"#,
+        ]);
+        with_test_env(dir.path(), Some(&query_server), || async {
+            cmd_query(
+                Some("e2e"),
+                "What is this project?".to_string(),
+                5,
+                true,
+                None,
+                64,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+    }
+}

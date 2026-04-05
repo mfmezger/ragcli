@@ -780,6 +780,30 @@ fn to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn one_shot_json_server(status_line: &str, body: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().unwrap();
+        let status_line = status_line.to_string();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status_line,
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).expect("write response");
+        });
+
+        format!("http://{}", addr)
+    }
 
     #[test]
     fn test_chunk_text_basic() {
@@ -869,5 +893,167 @@ mod tests {
 
         let pages = parse_liteparse_pages(json).unwrap();
         assert_eq!(pages, vec!["First page", "Second page"]);
+    }
+
+    #[test]
+    fn test_parse_liteparse_pages_errors_without_page_text() {
+        let json = br#"{"pages": [{"page": 1, "text": "   "}], "text": "   "}"#;
+        let err = parse_liteparse_pages(json).unwrap_err().to_string();
+        assert!(err.contains("did not contain page text"));
+    }
+
+    #[test]
+    fn test_collect_files_handles_single_file_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        let nested_dir = dir.path().join("nested");
+        let nested = nested_dir.join("b.md");
+        fs::create_dir_all(&nested_dir).unwrap();
+        fs::write(&file, "a").unwrap();
+        fs::write(&nested, "b").unwrap();
+
+        assert_eq!(collect_files(&file).unwrap(), vec![file.clone()]);
+
+        let mut files = collect_files(dir.path()).unwrap();
+        files.sort();
+        assert_eq!(files, vec![file, nested]);
+    }
+
+    #[test]
+    fn test_file_kind_recognizes_supported_extensions() {
+        assert_eq!(file_kind(Path::new("notes.md")), FileKind::Markdown);
+        assert_eq!(file_kind(Path::new("notes.txt")), FileKind::Text);
+        assert_eq!(file_kind(Path::new("paper.PDF")), FileKind::Pdf);
+        assert_eq!(file_kind(Path::new("image.jpeg")), FileKind::Image);
+        assert_eq!(file_kind(Path::new("archive.zip")), FileKind::Unsupported);
+    }
+
+    #[test]
+    fn test_display_name_and_image_retrieval_text() {
+        let path = Path::new("/tmp/example-image.png");
+        assert_eq!(display_name(path), "example-image.png");
+        assert_eq!(
+            build_image_retrieval_text(path, "  a cat on a mat  "),
+            "File: example-image.png\nCaption: a cat on a mat"
+        );
+    }
+
+    #[test]
+    fn test_parse_markdown_heading_and_split_blocks() {
+        assert_eq!(
+            parse_markdown_heading("### Title"),
+            Some((3, "Title".to_string()))
+        );
+        assert_eq!(parse_markdown_heading("####### nope"), None);
+        assert_eq!(parse_markdown_heading("#   "), None);
+
+        assert_eq!(
+            split_blocks("one\n\n two\nthree \n\n\n four"),
+            vec!["one", "two\nthree", "four"]
+        );
+    }
+
+    #[test]
+    fn test_chunk_blocks_with_prefix_and_overlap() {
+        let blocks = vec![
+            "Alpha".to_string(),
+            "Beta".to_string(),
+            "Gamma".to_string(),
+        ];
+
+        let chunks = chunk_blocks(&blocks, Some("Headings: Guide"), 28, 6);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "Headings: Guide\n\nAlpha\n\nBeta");
+        assert_eq!(chunks[1], "Headings: Guide\n\nBeta\n\nGamma");
+    }
+
+    #[test]
+    fn test_chunk_plain_text_adds_text_metadata() {
+        let chunks = chunk_plain_text("abcdef", 3, 1);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].text, "abc");
+        assert_eq!(chunks[0].metadata["format"], "text");
+    }
+
+    #[test]
+    fn test_pdf_heading_helpers_and_prefix() {
+        assert!(looks_like_pdf_heading("INTRODUCTION"));
+        assert!(looks_like_pdf_heading("1.2 Background"));
+        assert!(!looks_like_pdf_heading("This is a sentence."));
+        assert!(starts_with_section_marker("2.1 Methods"));
+        assert!(!starts_with_section_marker("Methods"));
+        assert!(is_title_like("Project Overview"));
+        assert!(!is_title_like("a very long phrase with too many lowercase words perhaps"));
+        assert_eq!(build_pdf_prefix(4, Some("Methods")), "Page: 4\nSection: Methods");
+        assert_eq!(build_pdf_prefix(4, None), "Page: 4");
+    }
+
+    #[test]
+    fn test_overlap_blocks_char_len_hash_and_hex() {
+        let kept = overlap_blocks(&["one".to_string(), "two".to_string(), "three".to_string()], 6);
+        assert_eq!(kept, vec!["three"]);
+        assert_eq!(char_len("hé🙂"), 3);
+
+        let path = Path::new("notes.txt");
+        let first = hash_text(path, "hello", 1, 0);
+        let second = hash_text(path, "hello", 1, 0);
+        let different = hash_text(path, "hello", 2, 0);
+        assert_eq!(first, second);
+        assert_ne!(first, different);
+        assert_eq!(to_hex(&[0x0f, 0xa0]), "0fa0");
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_skips_image_without_vision_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("photo.png");
+        fs::write(&image, b"image-bytes").unwrap();
+
+        let embedder = Embedder::new("http://unused".to_string(), "embed".to_string());
+        let result = ingest_path(dir.path(), 100, 0, &embedder, None, PdfParser::Native)
+            .await
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.stats.indexed_files, 0);
+        assert_eq!(result.stats.skipped_files, 1);
+        assert!(result.stats.errors[0].contains("no vision model is configured"));
+        assert_eq!(result.source_paths, vec![image.display().to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_reports_pdf_extraction_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("broken.pdf");
+        fs::write(&pdf, b"not a real pdf").unwrap();
+
+        let embedder = Embedder::new("http://unused".to_string(), "embed".to_string());
+        let result = ingest_path(&pdf, 100, 0, &embedder, None, PdfParser::Native)
+            .await
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.stats.indexed_files, 0);
+        assert_eq!(result.stats.skipped_files, 1);
+        assert!(result.stats.errors[0].contains("broken.pdf"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_reports_text_embedding_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("note.txt");
+        fs::write(&text, "hello world").unwrap();
+
+        let base_url = one_shot_json_server("500 Internal Server Error", r#"{"error":"boom"}"#);
+        let embedder = Embedder::new(base_url, "embed".to_string());
+        let result = ingest_path(&text, 100, 0, &embedder, None, PdfParser::Native)
+            .await
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+        assert_eq!(result.stats.indexed_files, 0);
+        assert_eq!(result.stats.skipped_files, 1);
+        assert!(result.stats.errors[0].contains("Ollama embed API error"));
     }
 }
