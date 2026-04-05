@@ -148,12 +148,24 @@ cargo check
 cargo test
 ```
 
+Coverage:
+
+```bash
+cargo install cargo-llvm-cov
+rustup component add llvm-tools-preview
+cargo llvm-cov --all-targets --fail-under-lines 80
+cargo llvm-cov --all-targets --html
+```
+
 If you use [Task](https://taskfile.dev/), the repo also includes [Taskfile.yml](Taskfile.yml) with shortcuts for the common workflows:
 
 ```bash
 task build
 task check
 task test
+task coverage
+task coverage-html
+task coverage-lcov
 task changelog
 task release -- patch
 task fmt
@@ -167,6 +179,18 @@ Task arguments can be forwarded to CLI tasks with `--`, for example:
 task index -- ./docs
 task query -- "What is this project about?"
 ```
+
+## CI and Coverage
+
+GitHub Actions runs both `cargo test --all-targets` and a separate coverage job using `cargo-llvm-cov` for pushes to `main` and pull requests targeting `main`.
+
+The coverage job fails if line coverage drops below 80%:
+
+```bash
+cargo llvm-cov --all-targets --fail-under-lines 80
+```
+
+To make this a merge requirement on GitHub, set the `Coverage (80% required)` status check as a required check in the branch protection rule for `main`.
 
 Releases are configured with `cargo-release` through [`Cargo.toml`](Cargo.toml). The repository is set up to:
 

@@ -46,6 +46,21 @@ tasks:
     cmds:
       - cargo fmt -- --check
 
+  coverage:
+    desc: Run test coverage with cargo-llvm-cov and enforce 80% line coverage
+    cmds:
+      - cargo llvm-cov --all-targets --fail-under-lines 80
+
+  coverage-html:
+    desc: Generate an HTML coverage report with cargo-llvm-cov
+    cmds:
+      - cargo llvm-cov --all-targets --html
+
+  coverage-lcov:
+    desc: Generate an LCOV coverage report at lcov.info
+    cmds:
+      - cargo llvm-cov --all-targets --lcov --output-path lcov.info
+
   doctor:
     desc: Run the local environment and store health checks
     cmds:
