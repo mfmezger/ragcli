@@ -12,7 +12,7 @@ pub enum PdfParserArg {
 
 /// Top-level CLI arguments.
 #[derive(Parser, Debug)]
-#[command(name = "ragcli", about = "Local RAG CLI")]
+#[command(name = "ragcli", about = "RAG CLI powered by Ollama.")]
 pub struct Cli {
     /// Selects the store under `~/.config/ragcli` to operate on.
     #[arg(long, global = true)]
