@@ -1,6 +1,7 @@
 //! File ingestion and chunking for the local RAG store.
 
 use crate::models::{Embedder, VisionCaptioner};
+use crate::source_kind::SourceKind;
 use crate::store::ChunkRow;
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -37,19 +38,16 @@ pub struct IngestResult {
     pub stats: IndexStats,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileKind {
-    Text,
-    Markdown,
-    Pdf,
-    Image,
-    Unsupported,
-}
-
 #[derive(Debug, Clone)]
 struct ChunkContent {
     text: String,
     metadata: Value,
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedUnit {
+    page_num: i32,
+    chunks: Vec<ChunkContent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,135 +79,36 @@ pub async fn ingest_path(
 
     for file in files {
         progress.set_message(format!("Reading {}", display_name(&file)));
-        match file_kind(&file) {
-            FileKind::Text => {
-                source_paths.insert(file.display().to_string());
-                match load_text_file(&file) {
-                    Ok(text) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = chunk_plain_text(&text, chunk_size, overlap);
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Markdown => {
-                source_paths.insert(file.display().to_string());
-                match load_text_file(&file) {
-                    Ok(text) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = chunk_markdown(&text, chunk_size, overlap);
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Pdf => {
-                source_paths.insert(file.display().to_string());
-                progress.set_message(format!("Extracting {}", display_name(&file)));
-                match extract_pdf_pages(&file, pdf_parser) {
-                    Ok(pages) => {
-                        let mut file_rows = Vec::new();
-                        let mut file_failed = None;
-                        for (page_idx, page_text) in pages.into_iter().enumerate() {
-                            let page_num = (page_idx + 1) as i32;
-                            progress.set_message(format!(
-                                "Embedding {} (page {})",
-                                display_name(&file),
-                                page_num
-                            ));
-                            let chunks = chunk_pdf_page(&page_text, page_num, chunk_size, overlap);
-                            match embed_chunks(&file, page_num, chunks, embedder, &mut dim).await {
-                                Ok(mut page_rows) => file_rows.append(&mut page_rows),
-                                Err(err) => {
-                                    file_failed = Some(err);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(err) = file_failed {
-                            stats.skipped_files += 1;
-                            stats.errors.push(format!("{}: {}", file.display(), err));
-                        } else {
-                            stats.indexed_files += 1;
-                            stats.total_chunks += file_rows.len();
-                            rows.append(&mut file_rows);
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Image => {
-                source_paths.insert(file.display().to_string());
-                let Some(vision) = vision else {
-                    stats.skipped_files += 1;
-                    stats.errors.push(format!(
-                        "{}: image skipped because no vision model is configured",
-                        file.display()
-                    ));
-                    continue;
-                };
-
-                progress.set_message(format!("Captioning {}", display_name(&file)));
-                match vision.caption_image(&file).await {
-                    Ok(caption) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = vec![ChunkContent {
-                            text: build_image_retrieval_text(&file, &caption),
-                            metadata: json!({
-                                "format": "image",
-                            }),
-                        }];
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Unsupported => {}
+        let kind = SourceKind::from_path(&file);
+        if kind == SourceKind::Unsupported {
+            progress.inc(1);
+            continue;
         }
+
+        source_paths.insert(file.display().to_string());
+
+        match extract_units(
+            &file, kind, chunk_size, overlap, vision, pdf_parser, &progress,
+        )
+        .await
+        {
+            Ok(units) => match embed_units(&file, units, embedder, &mut dim, &progress).await {
+                Ok(mut file_rows) => {
+                    stats.indexed_files += 1;
+                    stats.total_chunks += file_rows.len();
+                    rows.append(&mut file_rows);
+                }
+                Err(err) => {
+                    stats.skipped_files += 1;
+                    stats.errors.push(format!("{}: {}", file.display(), err));
+                }
+            },
+            Err(err) => {
+                stats.skipped_files += 1;
+                stats.errors.push(format!("{}: {}", file.display(), err));
+            }
+        }
+
         progress.inc(1);
     }
 
@@ -224,6 +123,87 @@ pub async fn ingest_path(
         embedding_dim: dim,
         stats,
     })
+}
+
+async fn extract_units(
+    path: &Path,
+    kind: SourceKind,
+    chunk_size: usize,
+    overlap: usize,
+    vision: Option<&VisionCaptioner>,
+    pdf_parser: PdfParser,
+    progress: &ProgressBar,
+) -> Result<Vec<ExtractedUnit>> {
+    match kind {
+        SourceKind::Text | SourceKind::Markdown => {
+            let text = load_text_file(path)?;
+            let chunks = match kind {
+                SourceKind::Text => chunk_plain_text(&text, chunk_size, overlap),
+                SourceKind::Markdown => chunk_markdown(&text, chunk_size, overlap),
+                _ => unreachable!("text-like source kind already matched"),
+            };
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks,
+            }])
+        }
+        SourceKind::Pdf => {
+            progress.set_message(format!("Extracting {}", display_name(path)));
+            let pages = extract_pdf_pages(path, pdf_parser)?;
+            Ok(pages
+                .into_iter()
+                .enumerate()
+                .map(|(page_idx, page_text)| {
+                    let page_num = (page_idx + 1) as i32;
+                    ExtractedUnit {
+                        page_num,
+                        chunks: chunk_pdf_page(&page_text, page_num, chunk_size, overlap),
+                    }
+                })
+                .collect())
+        }
+        SourceKind::Image => {
+            let vision = vision.context("image skipped because no vision model is configured")?;
+            progress.set_message(format!("Captioning {}", display_name(path)));
+            let caption = vision.caption_image(path).await?;
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks: vec![ChunkContent {
+                    text: build_image_retrieval_text(path, &caption),
+                    metadata: json!({
+                        "format": SourceKind::Image
+                            .format_label()
+                            .expect("image has format label"),
+                    }),
+                }],
+            }])
+        }
+        SourceKind::Unsupported => Ok(Vec::new()),
+    }
+}
+
+async fn embed_units(
+    path: &Path,
+    units: Vec<ExtractedUnit>,
+    embedder: &Embedder,
+    dim: &mut Option<usize>,
+    progress: &ProgressBar,
+) -> Result<Vec<ChunkRow>> {
+    let mut rows = Vec::new();
+    for unit in units {
+        if unit.page_num > 0 {
+            progress.set_message(format!(
+                "Embedding {} (page {})",
+                display_name(path),
+                unit.page_num
+            ));
+        } else {
+            progress.set_message(format!("Embedding {}", display_name(path)));
+        }
+        let mut unit_rows = embed_chunks(path, unit.page_num, unit.chunks, embedder, dim).await?;
+        rows.append(&mut unit_rows);
+    }
+    Ok(rows)
 }
 
 async fn embed_chunks(
@@ -275,21 +255,6 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn file_kind(path: &Path) -> FileKind {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "md" | "markdown" => FileKind::Markdown,
-        "txt" | "rst" => FileKind::Text,
-        "pdf" => FileKind::Pdf,
-        "png" | "jpg" | "jpeg" | "webp" => FileKind::Image,
-        _ => FileKind::Unsupported,
-    }
-}
-
 fn load_text_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -311,20 +276,11 @@ fn extract_pdf_pages_with_liteparse(path: &Path) -> Result<Vec<String>> {
         .arg("json")
         .arg("--quiet")
         .output()
-        .with_context(|| {
-            format!(
-                "run liteparse CLI (`lit parse`) for {}",
-                path.display()
-            )
-        })?;
+        .with_context(|| format!("run liteparse CLI (`lit parse`) for {}", path.display()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "liteparse failed for {}: {}",
-            path.display(),
-            stderr.trim()
-        );
+        anyhow::bail!("liteparse failed for {}: {}", path.display(), stderr.trim());
     }
 
     parse_liteparse_pages(&output.stdout)
@@ -392,7 +348,7 @@ fn chunk_plain_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<ChunkC
         .map(|text| ChunkContent {
             text,
             metadata: json!({
-                "format": "text",
+                "format": SourceKind::Text.format_label().expect("text has format label"),
             }),
         })
         .collect()
@@ -456,7 +412,7 @@ fn chunk_pdf_page(
             chunks.push(ChunkContent {
                 text,
                 metadata: json!({
-                    "format": "pdf",
+                    "format": SourceKind::Pdf.format_label().expect("pdf has format label"),
                     "section": heading,
                 }),
             });
@@ -521,7 +477,9 @@ fn push_markdown_section(
             sections.push(ChunkContent {
                 text: prefix,
                 metadata: json!({
-                    "format": "markdown",
+                    "format": SourceKind::Markdown
+                        .format_label()
+                        .expect("markdown has format label"),
                     "headings": heading_stack,
                 }),
             });
@@ -533,7 +491,9 @@ fn push_markdown_section(
         sections.push(ChunkContent {
             text,
             metadata: json!({
-                "format": "markdown",
+                "format": SourceKind::Markdown
+                    .format_label()
+                    .expect("markdown has format label"),
                 "headings": heading_stack,
             }),
         });
@@ -799,7 +759,9 @@ mod tests {
                 body.len(),
                 body
             );
-            stream.write_all(response.as_bytes()).expect("write response");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
         });
 
         format!("http://{}", addr)
@@ -920,15 +882,6 @@ mod tests {
     }
 
     #[test]
-    fn test_file_kind_recognizes_supported_extensions() {
-        assert_eq!(file_kind(Path::new("notes.md")), FileKind::Markdown);
-        assert_eq!(file_kind(Path::new("notes.txt")), FileKind::Text);
-        assert_eq!(file_kind(Path::new("paper.PDF")), FileKind::Pdf);
-        assert_eq!(file_kind(Path::new("image.jpeg")), FileKind::Image);
-        assert_eq!(file_kind(Path::new("archive.zip")), FileKind::Unsupported);
-    }
-
-    #[test]
     fn test_display_name_and_image_retrieval_text() {
         let path = Path::new("/tmp/example-image.png");
         assert_eq!(display_name(path), "example-image.png");
@@ -955,11 +908,7 @@ mod tests {
 
     #[test]
     fn test_chunk_blocks_with_prefix_and_overlap() {
-        let blocks = vec![
-            "Alpha".to_string(),
-            "Beta".to_string(),
-            "Gamma".to_string(),
-        ];
+        let blocks = vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()];
 
         let chunks = chunk_blocks(&blocks, Some("Headings: Guide"), 28, 6);
 
@@ -984,14 +933,22 @@ mod tests {
         assert!(starts_with_section_marker("2.1 Methods"));
         assert!(!starts_with_section_marker("Methods"));
         assert!(is_title_like("Project Overview"));
-        assert!(!is_title_like("a very long phrase with too many lowercase words perhaps"));
-        assert_eq!(build_pdf_prefix(4, Some("Methods")), "Page: 4\nSection: Methods");
+        assert!(!is_title_like(
+            "a very long phrase with too many lowercase words perhaps"
+        ));
+        assert_eq!(
+            build_pdf_prefix(4, Some("Methods")),
+            "Page: 4\nSection: Methods"
+        );
         assert_eq!(build_pdf_prefix(4, None), "Page: 4");
     }
 
     #[test]
     fn test_overlap_blocks_char_len_hash_and_hex() {
-        let kept = overlap_blocks(&["one".to_string(), "two".to_string(), "three".to_string()], 6);
+        let kept = overlap_blocks(
+            &["one".to_string(), "two".to_string(), "three".to_string()],
+            6,
+        );
         assert_eq!(kept, vec!["three"]);
         assert_eq!(char_len("hé🙂"), 3);
 
