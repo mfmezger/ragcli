@@ -450,9 +450,13 @@ fn classify_source_kind(source: &str) -> SourceKind {
         .any(|candidate| ext.eq_ignore_ascii_case(candidate))
     {
         SourceKind::Image
-    } else if ["md", "markdown", "txt", "rst"]
-        .iter()
-        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+    } else if [
+        "md", "markdown", "txt", "rst", "html", "htm", "csv", "tsv", "rs", "py", "js", "ts", "tsx",
+        "jsx", "go", "java", "c", "cc", "cpp", "cxx", "h", "hpp", "sh", "bash", "toml", "yaml",
+        "yml", "json",
+    ]
+    .iter()
+    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
     {
         SourceKind::Text
     } else {

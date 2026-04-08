@@ -38,8 +38,20 @@ async fn main() -> Result<()> {
             chunk_overlap,
             embed_model,
             pdf_parser,
+            exclude,
+            include_hidden,
         } => {
-            cmd_index(name, path, chunk_size, chunk_overlap, embed_model, pdf_parser).await?
+            cmd_index(
+                name,
+                path,
+                chunk_size,
+                chunk_overlap,
+                embed_model,
+                pdf_parser,
+                exclude,
+                include_hidden,
+            )
+            .await?
         }
         Command::Query {
             question,
@@ -66,6 +78,8 @@ async fn cmd_index(
     chunk_overlap: Option<usize>,
     embed_model: Option<String>,
     pdf_parser: Option<PdfParserArg>,
+    exclude: Vec<String>,
+    include_hidden: bool,
 ) -> Result<()> {
     let started = Instant::now();
     let store = store_dir(name)?;
@@ -94,6 +108,8 @@ async fn cmd_index(
             PdfParserArg::Native => PdfParser::Native,
             PdfParserArg::Liteparse => PdfParser::Liteparse,
         },
+        &exclude,
+        include_hidden,
     )
     .await?;
 
@@ -441,7 +457,11 @@ mod tests {
         ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    async fn with_test_env<T, F>(config_home: &Path, ollama_url: Option<&str>, f: impl FnOnce() -> F) -> T
+    async fn with_test_env<T, F>(
+        config_home: &Path,
+        ollama_url: Option<&str>,
+        f: impl FnOnce() -> F,
+    ) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -487,7 +507,9 @@ mod tests {
                     body.len(),
                     body
                 );
-                stream.write_all(response.as_bytes()).expect("write response");
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
             }
         });
 
@@ -522,9 +544,13 @@ mod tests {
     async fn test_cmd_config_set_and_show_succeed_for_named_store() {
         let dir = tempfile::tempdir().unwrap();
         with_test_env(dir.path(), None, || async {
-            cmd_config_set(Some("test-store"), "models.chat".to_string(), "chat-z".to_string())
-                .await
-                .unwrap();
+            cmd_config_set(
+                Some("test-store"),
+                "models.chat".to_string(),
+                "chat-z".to_string(),
+            )
+            .await
+            .unwrap();
             cmd_config_show(Some("test-store")).await.unwrap();
 
             let store = store_dir(Some("test-store")).unwrap();
@@ -547,7 +573,9 @@ mod tests {
     #[tokio::test]
     async fn test_cmd_doctor_succeeds_with_reachable_mock_ollama() {
         let dir = tempfile::tempdir().unwrap();
-        let server = sequential_json_server(vec![r#"{"models":[{"name":"nomic-embed-text-v2-moe:latest"},{"name":"qwen3.5:4b"}]}"#]);
+        let server = sequential_json_server(vec![
+            r#"{"models":[{"name":"nomic-embed-text-v2-moe:latest"},{"name":"qwen3.5:4b"}]}"#,
+        ]);
 
         with_test_env(dir.path(), Some(&server), || async {
             cmd_doctor(Some("reachable")).await.unwrap();
@@ -572,6 +600,8 @@ mod tests {
                 Some(0),
                 None,
                 None,
+                Vec::new(),
+                false,
             )
             .await
             .unwrap();
