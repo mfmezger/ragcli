@@ -1,13 +1,12 @@
 //! Small filesystem helpers shared across the CLI.
 
 use anyhow::{Context, Result};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use atomicwrites::{AllowOverwrite, AtomicFile};
+use std::fs;
+use std::io::{self, Write};
 use std::path::Path;
-use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Writes a file by flushing a uniquely named sibling temp file and then renaming it in place.
+/// Writes a file atomically by flushing a temp file and replacing the destination in place.
 pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -15,41 +14,14 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<()> {
     fs::create_dir_all(parent)
         .with_context(|| format!("create parent directory for {}", path.display()))?;
 
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system time before unix epoch")?
-        .as_nanos();
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("resolve file name for {}", path.display()))?;
-    let tmp_path = parent.join(format!(".{}.{}.{}.tmp", file_name, process::id(), nonce));
+    AtomicFile::new(path, AllowOverwrite)
+        .write(|file| -> io::Result<()> {
+            file.write_all(content.as_bytes())?;
+            Ok(())
+        })
+        .map_err(io::Error::from)
+        .with_context(|| format!("write file atomically: {}", path.display()))?;
 
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)
-        .with_context(|| format!("create temp file for {}", path.display()))?;
-
-    let write_result = (|| -> Result<()> {
-        file.write_all(content.as_bytes())
-            .with_context(|| format!("write temp file for {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("flush temp file for {}", path.display()))?;
-        Ok(())
-    })();
-
-    if let Err(err) = write_result {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err);
-    }
-
-    fs::rename(&tmp_path, path).with_context(|| {
-        format!(
-            "rename temp file into place for {}",
-            path.display()
-        )
-    })?;
     Ok(())
 }
 
