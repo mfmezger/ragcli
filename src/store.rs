@@ -1,5 +1,6 @@
 //! LanceDB storage helpers and store metadata utilities.
 
+use crate::ingest::{file_kind, FileKind};
 use anyhow::{bail, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -438,29 +439,11 @@ enum SourceKind {
 }
 
 fn classify_source_kind(source: &str) -> SourceKind {
-    let ext = Path::new(source)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("");
-
-    if ext.eq_ignore_ascii_case("pdf") {
-        SourceKind::Pdf
-    } else if ["png", "jpg", "jpeg", "webp"]
-        .iter()
-        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-    {
-        SourceKind::Image
-    } else if [
-        "md", "markdown", "txt", "rst", "html", "htm", "csv", "tsv", "rs", "py", "js", "ts", "tsx",
-        "jsx", "go", "java", "c", "cc", "cpp", "cxx", "h", "hpp", "sh", "bash", "toml", "yaml",
-        "yml", "json",
-    ]
-    .iter()
-    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-    {
-        SourceKind::Text
-    } else {
-        SourceKind::Other
+    match file_kind(Path::new(source)) {
+        FileKind::Pdf => SourceKind::Pdf,
+        FileKind::Image => SourceKind::Image,
+        FileKind::Unsupported => SourceKind::Other,
+        _ => SourceKind::Text,
     }
 }
 

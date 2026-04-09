@@ -39,7 +39,7 @@ pub struct IngestResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileKind {
+pub(crate) enum FileKind {
     Text,
     Markdown,
     Html,
@@ -404,7 +404,7 @@ fn is_hidden_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn file_kind(path: &Path) -> FileKind {
+pub(crate) fn file_kind(path: &Path) -> FileKind {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
