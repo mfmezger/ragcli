@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
-use serde::Deserialize;
-use std::path::Path;
-use std::time::Duration;
-#[cfg(test)]
-use std::path::PathBuf;
 #[cfg(test)]
 use reqwest_middleware::ClientWithMiddleware;
+use serde::Deserialize;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// Embedding client backed by Ollama's `/api/embed` endpoint.
 pub struct Embedder {
@@ -82,7 +82,11 @@ impl OllamaClient {
     /// Returns the installed model names reported by Ollama.
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        let (status, body) = self.client.get_text(url).await.context("call Ollama tags API")?;
+        let (status, body) = self
+            .client
+            .get_text(url)
+            .await
+            .context("call Ollama tags API")?;
         if !status.is_success() {
             anyhow::bail!("Ollama tags API error: {} - {}", status, body);
         }
@@ -351,7 +355,9 @@ mod tests {
                 body.len(),
                 body
             );
-            stream.write_all(response.as_bytes()).expect("write response");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
         });
 
         format!("http://{}", addr)
@@ -379,10 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_embed_success() {
-        let base_url = one_shot_server(
-            "200 OK",
-            r#"{"embeddings":[[0.25,0.5,0.75]]}"#,
-        );
+        let base_url = one_shot_server("200 OK", r#"{"embeddings":[[0.25,0.5,0.75]]}"#);
 
         let embedder = Embedder::new(base_url, "embed-model".to_string());
         let embedding = embedder.embed("hello").await.unwrap();
@@ -400,10 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_caption_image_success() {
-        let base_url = one_shot_server(
-            "200 OK",
-            r#"{"message":{"content":"A small orange cat."}}"#,
-        );
+        let base_url =
+            one_shot_server("200 OK", r#"{"message":{"content":"A small orange cat."}}"#);
         let captioner = VisionCaptioner::new(base_url, "vision-model".to_string());
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("cat.png");
