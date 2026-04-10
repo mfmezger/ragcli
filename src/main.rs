@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod ingest;
 mod models;
+mod source_kind;
 mod store;
 
 use anyhow::{Context, Result};
