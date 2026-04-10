@@ -1,8 +1,10 @@
 //! File ingestion and chunking for the local RAG store.
 
 use crate::models::{Embedder, VisionCaptioner};
+use crate::source_kind::SourceKind;
 use crate::store::ChunkRow;
 use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
 use serde_json::{json, Value};
@@ -11,7 +13,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 /// Aggregated indexing counters for a single ingest run.
 pub struct IndexStats {
@@ -37,25 +39,28 @@ pub struct IngestResult {
     pub stats: IndexStats,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileKind {
-    Text,
-    Markdown,
-    Pdf,
-    Image,
-    Unsupported,
-}
-
 #[derive(Debug, Clone)]
 struct ChunkContent {
     text: String,
     metadata: Value,
 }
 
+#[derive(Debug, Clone)]
+struct ExtractedUnit {
+    page_num: i32,
+    chunks: Vec<ChunkContent>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PdfParser {
     Native,
     Liteparse,
+}
+
+#[derive(Debug)]
+struct IngestOptions {
+    excludes: GlobSet,
+    include_hidden: bool,
 }
 
 /// Walks a file or directory, extracts supported content, and returns chunk rows.
@@ -66,8 +71,11 @@ pub async fn ingest_path(
     embedder: &Embedder,
     vision: Option<&VisionCaptioner>,
     pdf_parser: PdfParser,
+    exclude_patterns: &[String],
+    include_hidden: bool,
 ) -> Result<IngestResult> {
-    let files = collect_files(path)?;
+    let options = build_ingest_options(exclude_patterns, include_hidden)?;
+    let files = collect_files(path, &options)?;
     let progress = build_progress_bar(files.len() as u64);
     let mut rows = Vec::new();
     let mut source_paths = BTreeSet::new();
@@ -81,135 +89,36 @@ pub async fn ingest_path(
 
     for file in files {
         progress.set_message(format!("Reading {}", display_name(&file)));
-        match file_kind(&file) {
-            FileKind::Text => {
-                source_paths.insert(file.display().to_string());
-                match load_text_file(&file) {
-                    Ok(text) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = chunk_plain_text(&text, chunk_size, overlap);
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Markdown => {
-                source_paths.insert(file.display().to_string());
-                match load_text_file(&file) {
-                    Ok(text) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = chunk_markdown(&text, chunk_size, overlap);
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Pdf => {
-                source_paths.insert(file.display().to_string());
-                progress.set_message(format!("Extracting {}", display_name(&file)));
-                match extract_pdf_pages(&file, pdf_parser) {
-                    Ok(pages) => {
-                        let mut file_rows = Vec::new();
-                        let mut file_failed = None;
-                        for (page_idx, page_text) in pages.into_iter().enumerate() {
-                            let page_num = (page_idx + 1) as i32;
-                            progress.set_message(format!(
-                                "Embedding {} (page {})",
-                                display_name(&file),
-                                page_num
-                            ));
-                            let chunks = chunk_pdf_page(&page_text, page_num, chunk_size, overlap);
-                            match embed_chunks(&file, page_num, chunks, embedder, &mut dim).await {
-                                Ok(mut page_rows) => file_rows.append(&mut page_rows),
-                                Err(err) => {
-                                    file_failed = Some(err);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(err) = file_failed {
-                            stats.skipped_files += 1;
-                            stats.errors.push(format!("{}: {}", file.display(), err));
-                        } else {
-                            stats.indexed_files += 1;
-                            stats.total_chunks += file_rows.len();
-                            rows.append(&mut file_rows);
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Image => {
-                source_paths.insert(file.display().to_string());
-                let Some(vision) = vision else {
-                    stats.skipped_files += 1;
-                    stats.errors.push(format!(
-                        "{}: image skipped because no vision model is configured",
-                        file.display()
-                    ));
-                    continue;
-                };
-
-                progress.set_message(format!("Captioning {}", display_name(&file)));
-                match vision.caption_image(&file).await {
-                    Ok(caption) => {
-                        progress.set_message(format!("Embedding {}", display_name(&file)));
-                        let chunks = vec![ChunkContent {
-                            text: build_image_retrieval_text(&file, &caption),
-                            metadata: json!({
-                                "format": "image",
-                            }),
-                        }];
-                        match embed_chunks(&file, 0, chunks, embedder, &mut dim).await {
-                            Ok(mut file_rows) => {
-                                stats.indexed_files += 1;
-                                stats.total_chunks += file_rows.len();
-                                rows.append(&mut file_rows);
-                            }
-                            Err(err) => {
-                                stats.skipped_files += 1;
-                                stats.errors.push(format!("{}: {}", file.display(), err));
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        stats.skipped_files += 1;
-                        stats.errors.push(format!("{}: {}", file.display(), err));
-                    }
-                }
-            }
-            FileKind::Unsupported => {}
+        let kind = SourceKind::from_path(&file);
+        if kind == SourceKind::Unsupported {
+            progress.inc(1);
+            continue;
         }
+
+        source_paths.insert(file.display().to_string());
+
+        match extract_units(
+            &file, kind, chunk_size, overlap, vision, pdf_parser, &progress,
+        )
+        .await
+        {
+            Ok(units) => match embed_units(&file, units, embedder, &mut dim, &progress).await {
+                Ok(mut file_rows) => {
+                    stats.indexed_files += 1;
+                    stats.total_chunks += file_rows.len();
+                    rows.append(&mut file_rows);
+                }
+                Err(err) => {
+                    stats.skipped_files += 1;
+                    stats.errors.push(format!("{}: {}", file.display(), err));
+                }
+            },
+            Err(err) => {
+                stats.skipped_files += 1;
+                stats.errors.push(format!("{}: {}", file.display(), err));
+            }
+        }
+
         progress.inc(1);
     }
 
@@ -224,6 +133,126 @@ pub async fn ingest_path(
         embedding_dim: dim,
         stats,
     })
+}
+
+async fn extract_units(
+    path: &Path,
+    kind: SourceKind,
+    chunk_size: usize,
+    overlap: usize,
+    vision: Option<&VisionCaptioner>,
+    pdf_parser: PdfParser,
+    progress: &ProgressBar,
+) -> Result<Vec<ExtractedUnit>> {
+    match kind {
+        SourceKind::Text | SourceKind::Markdown => {
+            let text = load_text_file(path)?;
+            let chunks = if kind == SourceKind::Text {
+                chunk_plain_text(&text, chunk_size, overlap)
+            } else {
+                chunk_markdown(&text, chunk_size, overlap)
+            };
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks,
+            }])
+        }
+        SourceKind::Html => {
+            let text = load_html_file(path)?;
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("html has format label"),
+                    None,
+                    chunk_size,
+                    overlap,
+                ),
+            }])
+        }
+        SourceKind::Csv { delimiter } => {
+            let text = load_delimited_file(path, delimiter)?;
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("csv has format label"),
+                    None,
+                    chunk_size,
+                    overlap,
+                ),
+            }])
+        }
+        SourceKind::Code { language } => {
+            let text = load_text_file(path)?;
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("code has format label"),
+                    Some(language),
+                    chunk_size,
+                    overlap,
+                ),
+            }])
+        }
+        SourceKind::Pdf => {
+            progress.set_message(format!("Extracting {}", display_name(path)));
+            let pages = extract_pdf_pages(path, pdf_parser)?;
+            Ok(pages
+                .into_iter()
+                .enumerate()
+                .map(|(page_idx, page_text)| {
+                    let page_num = (page_idx + 1) as i32;
+                    ExtractedUnit {
+                        page_num,
+                        chunks: chunk_pdf_page(&page_text, page_num, chunk_size, overlap),
+                    }
+                })
+                .collect())
+        }
+        SourceKind::Image => {
+            let vision = vision.context("image skipped because no vision model is configured")?;
+            progress.set_message(format!("Captioning {}", display_name(path)));
+            let caption = vision.caption_image(path).await?;
+            Ok(vec![ExtractedUnit {
+                page_num: 0,
+                chunks: vec![ChunkContent {
+                    text: build_image_retrieval_text(path, &caption),
+                    metadata: json!({
+                        "format": SourceKind::Image
+                            .format_label()
+                            .expect("image has format label"),
+                    }),
+                }],
+            }])
+        }
+        SourceKind::Unsupported => Ok(Vec::new()),
+    }
+}
+
+async fn embed_units(
+    path: &Path,
+    units: Vec<ExtractedUnit>,
+    embedder: &Embedder,
+    dim: &mut Option<usize>,
+    progress: &ProgressBar,
+) -> Result<Vec<ChunkRow>> {
+    let mut rows = Vec::new();
+    for unit in units {
+        if unit.page_num > 0 {
+            progress.set_message(format!(
+                "Embedding {} (page {})",
+                display_name(path),
+                unit.page_num
+            ));
+        } else {
+            progress.set_message(format!("Embedding {}", display_name(path)));
+        }
+        let mut unit_rows = embed_chunks(path, unit.page_num, unit.chunks, embedder, dim).await?;
+        rows.append(&mut unit_rows);
+    }
+    Ok(rows)
 }
 
 async fn embed_chunks(
@@ -259,40 +288,114 @@ async fn embed_chunks(
     Ok(rows)
 }
 
-fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
+fn build_ingest_options(
+    exclude_patterns: &[String],
+    include_hidden: bool,
+) -> Result<IngestOptions> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in exclude_patterns {
+        builder
+            .add(Glob::new(pattern).with_context(|| format!("invalid exclude glob: {pattern}"))?);
+    }
+
+    Ok(IngestOptions {
+        excludes: builder.build().context("build exclude glob set")?,
+        include_hidden,
+    })
+}
+
+fn collect_files(path: &Path, options: &IngestOptions) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if path.is_file() {
-        files.push(path.to_path_buf());
+        if should_index_path(path, options) {
+            files.push(path.to_path_buf());
+        }
         return Ok(files);
     }
 
-    for entry in WalkDir::new(path) {
+    for entry in WalkDir::new(path)
+        .into_iter()
+        .filter_entry(|entry| should_traverse_entry(entry, options))
+    {
         let entry = entry?;
-        if entry.file_type().is_file() {
+        if entry.file_type().is_file() && should_index_path(entry.path(), options) {
             files.push(entry.path().to_path_buf());
         }
     }
     Ok(files)
 }
 
-fn file_kind(path: &Path) -> FileKind {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    match ext.as_str() {
-        "md" | "markdown" => FileKind::Markdown,
-        "txt" | "rst" => FileKind::Text,
-        "pdf" => FileKind::Pdf,
-        "png" | "jpg" | "jpeg" | "webp" => FileKind::Image,
-        _ => FileKind::Unsupported,
+fn should_traverse_entry(entry: &DirEntry, options: &IngestOptions) -> bool {
+    if entry.depth() == 0 {
+        return true;
     }
+    if options.excludes.is_match(entry.path()) {
+        return false;
+    }
+
+    options.include_hidden || !is_hidden_path(entry.path())
 }
 
+fn should_index_path(path: &Path, options: &IngestOptions) -> bool {
+    !options.excludes.is_match(path) && (options.include_hidden || !is_hidden_path(path))
+}
+
+fn is_hidden_path(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().starts_with('.'))
+        .unwrap_or(false)
+}
 fn load_text_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn load_html_file(path: &Path) -> Result<String> {
+    let html = load_text_file(path)?;
+    let rendered =
+        html2text::from_read(html.as_bytes(), usize::MAX).context("render html as text")?;
+    Ok(rendered.trim().to_string())
+}
+
+fn load_delimited_file(path: &Path, delimiter: u8) -> Result<String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .flexible(true)
+        .from_path(path)
+        .with_context(|| format!("open delimited file: {}", path.display()))?;
+
+    let headers = reader
+        .headers()
+        .with_context(|| format!("read headers from {}", path.display()))?
+        .iter()
+        .map(|header| header.trim().to_string())
+        .collect::<Vec<_>>();
+
+    let mut lines = Vec::new();
+    if !headers.is_empty() {
+        lines.push(format!("Columns: {}", headers.join(", ")));
+    }
+
+    for record in reader.records() {
+        let record = record.with_context(|| format!("read row from {}", path.display()))?;
+        let cells = record
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                let label = headers
+                    .get(idx)
+                    .map(String::as_str)
+                    .filter(|header| !header.is_empty());
+                match label {
+                    Some(header) => format!("{}: {}", header, value.trim()),
+                    None => value.trim().to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+        lines.push(cells.join(" | "));
+    }
+
+    Ok(lines.join("\n"))
 }
 
 fn extract_pdf_pages(path: &Path, parser: PdfParser) -> Result<Vec<String>> {
@@ -311,20 +414,11 @@ fn extract_pdf_pages_with_liteparse(path: &Path) -> Result<Vec<String>> {
         .arg("json")
         .arg("--quiet")
         .output()
-        .with_context(|| {
-            format!(
-                "run liteparse CLI (`lit parse`) for {}",
-                path.display()
-            )
-        })?;
+        .with_context(|| format!("run liteparse CLI (`lit parse`) for {}", path.display()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "liteparse failed for {}: {}",
-            path.display(),
-            stderr.trim()
-        );
+        anyhow::bail!("liteparse failed for {}: {}", path.display(), stderr.trim());
     }
 
     parse_liteparse_pages(&output.stdout)
@@ -386,16 +480,31 @@ fn build_image_retrieval_text(path: &Path, caption: &str) -> String {
     format!("File: {}\nCaption: {}", display_name(path), caption.trim())
 }
 
-fn chunk_plain_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<ChunkContent> {
+fn chunk_document_text(
+    text: &str,
+    format: &str,
+    language: Option<&str>,
+    chunk_size: usize,
+    overlap: usize,
+) -> Vec<ChunkContent> {
     chunk_text(text, chunk_size, overlap)
         .into_iter()
-        .map(|text| ChunkContent {
-            text,
-            metadata: json!({
-                "format": "text",
-            }),
+        .map(|text| {
+            let mut metadata = json!({
+                "format": format,
+            });
+            if let Some(obj) = metadata.as_object_mut() {
+                if let Some(language) = language {
+                    obj.insert("language".to_string(), json!(language));
+                }
+            }
+            ChunkContent { text, metadata }
         })
         .collect()
+}
+
+fn chunk_plain_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<ChunkContent> {
+    chunk_document_text(text, "text", None, chunk_size, overlap)
 }
 
 fn chunk_markdown(text: &str, chunk_size: usize, overlap: usize) -> Vec<ChunkContent> {
@@ -456,7 +565,7 @@ fn chunk_pdf_page(
             chunks.push(ChunkContent {
                 text,
                 metadata: json!({
-                    "format": "pdf",
+                    "format": SourceKind::Pdf.format_label().expect("pdf has format label"),
                     "section": heading,
                 }),
             });
@@ -521,7 +630,9 @@ fn push_markdown_section(
             sections.push(ChunkContent {
                 text: prefix,
                 metadata: json!({
-                    "format": "markdown",
+                    "format": SourceKind::Markdown
+                        .format_label()
+                        .expect("markdown has format label"),
                     "headings": heading_stack,
                 }),
             });
@@ -533,7 +644,9 @@ fn push_markdown_section(
         sections.push(ChunkContent {
             text,
             metadata: json!({
-                "format": "markdown",
+                "format": SourceKind::Markdown
+                    .format_label()
+                    .expect("markdown has format label"),
                 "headings": heading_stack,
             }),
         });
@@ -799,7 +912,9 @@ mod tests {
                 body.len(),
                 body
             );
-            stream.write_all(response.as_bytes()).expect("write response");
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
         });
 
         format!("http://{}", addr)
@@ -912,20 +1027,32 @@ mod tests {
         fs::write(&file, "a").unwrap();
         fs::write(&nested, "b").unwrap();
 
-        assert_eq!(collect_files(&file).unwrap(), vec![file.clone()]);
+        let options = build_ingest_options(&[], true).unwrap();
+        assert_eq!(collect_files(&file, &options).unwrap(), vec![file.clone()]);
 
-        let mut files = collect_files(dir.path()).unwrap();
+        let mut files = collect_files(dir.path(), &options).unwrap();
         files.sort();
         assert_eq!(files, vec![file, nested]);
     }
 
     #[test]
-    fn test_file_kind_recognizes_supported_extensions() {
-        assert_eq!(file_kind(Path::new("notes.md")), FileKind::Markdown);
-        assert_eq!(file_kind(Path::new("notes.txt")), FileKind::Text);
-        assert_eq!(file_kind(Path::new("paper.PDF")), FileKind::Pdf);
-        assert_eq!(file_kind(Path::new("image.jpeg")), FileKind::Image);
-        assert_eq!(file_kind(Path::new("archive.zip")), FileKind::Unsupported);
+    fn test_collect_files_skips_hidden_and_excluded_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let visible = dir.path().join("visible.txt");
+        let hidden_dir = dir.path().join(".git");
+        let hidden_file = hidden_dir.join("config");
+        let excluded_dir = dir.path().join("target");
+        let excluded_file = excluded_dir.join("out.txt");
+        fs::create_dir_all(&hidden_dir).unwrap();
+        fs::create_dir_all(&excluded_dir).unwrap();
+        fs::write(&visible, "ok").unwrap();
+        fs::write(&hidden_file, "hidden").unwrap();
+        fs::write(&excluded_file, "skip").unwrap();
+
+        let options = build_ingest_options(&["**/target/**".to_string()], false).unwrap();
+        let files = collect_files(dir.path(), &options).unwrap();
+
+        assert_eq!(files, vec![visible]);
     }
 
     #[test]
@@ -955,11 +1082,7 @@ mod tests {
 
     #[test]
     fn test_chunk_blocks_with_prefix_and_overlap() {
-        let blocks = vec![
-            "Alpha".to_string(),
-            "Beta".to_string(),
-            "Gamma".to_string(),
-        ];
+        let blocks = vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()];
 
         let chunks = chunk_blocks(&blocks, Some("Headings: Guide"), 28, 6);
 
@@ -977,6 +1100,35 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_document_text_adds_language_metadata() {
+        let chunks = chunk_document_text("fn main() {}", "code", Some("rust"), 100, 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].metadata["format"], "code");
+        assert_eq!(chunks[0].metadata["language"], "rust");
+    }
+
+    #[test]
+    fn test_load_html_and_delimited_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("index.html");
+        let csv = dir.path().join("people.csv");
+        fs::write(
+            &html,
+            "<html><body><h1>Title</h1><p>Hello <b>world</b>.</p></body></html>",
+        )
+        .unwrap();
+        fs::write(&csv, "name,role\nMina,Engineer\nKai,Designer\n").unwrap();
+
+        let html_text = load_html_file(&html).unwrap();
+        assert!(html_text.contains("Title"));
+        assert!(html_text.contains("Hello world."));
+
+        let csv_text = load_delimited_file(&csv, b',').unwrap();
+        assert!(csv_text.contains("Columns: name, role"));
+        assert!(csv_text.contains("name: Mina | role: Engineer"));
+    }
+
+    #[test]
     fn test_pdf_heading_helpers_and_prefix() {
         assert!(looks_like_pdf_heading("INTRODUCTION"));
         assert!(looks_like_pdf_heading("1.2 Background"));
@@ -984,14 +1136,22 @@ mod tests {
         assert!(starts_with_section_marker("2.1 Methods"));
         assert!(!starts_with_section_marker("Methods"));
         assert!(is_title_like("Project Overview"));
-        assert!(!is_title_like("a very long phrase with too many lowercase words perhaps"));
-        assert_eq!(build_pdf_prefix(4, Some("Methods")), "Page: 4\nSection: Methods");
+        assert!(!is_title_like(
+            "a very long phrase with too many lowercase words perhaps"
+        ));
+        assert_eq!(
+            build_pdf_prefix(4, Some("Methods")),
+            "Page: 4\nSection: Methods"
+        );
         assert_eq!(build_pdf_prefix(4, None), "Page: 4");
     }
 
     #[test]
     fn test_overlap_blocks_char_len_hash_and_hex() {
-        let kept = overlap_blocks(&["one".to_string(), "two".to_string(), "three".to_string()], 6);
+        let kept = overlap_blocks(
+            &["one".to_string(), "two".to_string(), "three".to_string()],
+            6,
+        );
         assert_eq!(kept, vec!["three"]);
         assert_eq!(char_len("hé🙂"), 3);
 
@@ -1011,9 +1171,18 @@ mod tests {
         fs::write(&image, b"image-bytes").unwrap();
 
         let embedder = Embedder::new("http://unused".to_string(), "embed".to_string());
-        let result = ingest_path(dir.path(), 100, 0, &embedder, None, PdfParser::Native)
-            .await
-            .unwrap();
+        let result = ingest_path(
+            dir.path(),
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.indexed_files, 0);
@@ -1029,7 +1198,7 @@ mod tests {
         fs::write(&pdf, b"not a real pdf").unwrap();
 
         let embedder = Embedder::new("http://unused".to_string(), "embed".to_string());
-        let result = ingest_path(&pdf, 100, 0, &embedder, None, PdfParser::Native)
+        let result = ingest_path(&pdf, 100, 0, &embedder, None, PdfParser::Native, &[], false)
             .await
             .unwrap();
 
@@ -1040,6 +1209,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ingest_path_indexes_html_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("index.html");
+        fs::write(
+            &html,
+            "<html><body><h1>Guide</h1><p>Hello world.</p></body></html>",
+        )
+        .unwrap();
+
+        let base_url = one_shot_json_server("200 OK", r#"{"embeddings":[[0.1,0.2]]}"#);
+        let embedder = Embedder::new(base_url, "embed".to_string());
+        let result = ingest_path(
+            &html,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stats.indexed_files, 1);
+        assert_eq!(result.stats.skipped_files, 0);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].page, 0);
+        assert!(result.rows[0].chunk_text.contains("Guide"));
+        assert!(result.rows[0].chunk_text.contains("Hello world."));
+        assert!(result.rows[0].metadata.contains("\"format\":\"html\""));
+    }
+
+    #[tokio::test]
     async fn test_ingest_path_reports_text_embedding_error() {
         let dir = tempfile::tempdir().unwrap();
         let text = dir.path().join("note.txt");
@@ -1047,9 +1250,18 @@ mod tests {
 
         let base_url = one_shot_json_server("500 Internal Server Error", r#"{"error":"boom"}"#);
         let embedder = Embedder::new(base_url, "embed".to_string());
-        let result = ingest_path(&text, 100, 0, &embedder, None, PdfParser::Native)
-            .await
-            .unwrap();
+        let result = ingest_path(
+            &text,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.indexed_files, 0);

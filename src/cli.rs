@@ -42,6 +42,12 @@ pub enum Command {
         /// Selects the PDF parser used for `.pdf` inputs.
         #[arg(long, value_enum)]
         pdf_parser: Option<PdfParserArg>,
+        /// Excludes files or directories matching the provided glob.
+        #[arg(long = "exclude")]
+        exclude: Vec<String>,
+        /// Includes hidden files and directories during traversal.
+        #[arg(long, default_value_t = false)]
+        include_hidden: bool,
     },
     /// Queries the local store and generates an answer.
     Query {

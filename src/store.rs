@@ -1,6 +1,7 @@
 //! LanceDB storage helpers and store metadata utilities.
 
 use crate::fsutil::write_atomic;
+use crate::source_kind::{ContentCategory, SourceKind};
 use anyhow::{bail, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -349,6 +350,8 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
             .as_any()
             .downcast_ref::<Int32Array>()
             .context("page column type")?;
+        let mut current_source = None;
+        let mut current_kind = SourceKind::Unsupported;
 
         for i in 0..batch.num_rows() {
             let source = source_col.value(i);
@@ -377,13 +380,13 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
             entry.chars += chars;
             entry.estimated_tokens += estimated_tokens;
 
-            match classify_source_kind(source) {
-                SourceKind::Pdf => {
-                    if page_col.value(i) > 0 {
-                        pdf_pages.insert((source.to_string(), page_col.value(i)));
-                    }
-                }
-                _ => {}
+            if current_source != Some(source) {
+                current_source = Some(source);
+                current_kind = SourceKind::from_path(Path::new(source));
+            }
+
+            if current_kind == SourceKind::Pdf && page_col.value(i) > 0 {
+                pdf_pages.insert((source.to_string(), page_col.value(i)));
             }
         }
     }
@@ -392,11 +395,11 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
     stats.pdf_pages = pdf_pages.len();
 
     for source in source_stats.keys() {
-        match classify_source_kind(source) {
-            SourceKind::Pdf => stats.content_kinds.pdf_files += 1,
-            SourceKind::Image => stats.content_kinds.image_files += 1,
-            SourceKind::Text => stats.content_kinds.text_files += 1,
-            SourceKind::Other => stats.content_kinds.other_files += 1,
+        match SourceKind::from_path(Path::new(source)).content_category() {
+            ContentCategory::Pdf => stats.content_kinds.pdf_files += 1,
+            ContentCategory::Image => stats.content_kinds.image_files += 1,
+            ContentCategory::Text => stats.content_kinds.text_files += 1,
+            ContentCategory::Other => stats.content_kinds.other_files += 1,
         }
     }
 
@@ -428,37 +431,6 @@ pub fn strip_thinking(text: &str) -> String {
 
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceKind {
-    Text,
-    Pdf,
-    Image,
-    Other,
-}
-
-fn classify_source_kind(source: &str) -> SourceKind {
-    let ext = Path::new(source)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("");
-
-    if ext.eq_ignore_ascii_case("pdf") {
-        SourceKind::Pdf
-    } else if ["png", "jpg", "jpeg", "webp"]
-        .iter()
-        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-    {
-        SourceKind::Image
-    } else if ["md", "markdown", "txt", "rst"]
-        .iter()
-        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
-    {
-        SourceKind::Text
-    } else {
-        SourceKind::Other
-    }
 }
 
 fn estimate_token_count(text: &str) -> usize {
