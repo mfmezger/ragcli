@@ -349,6 +349,8 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
             .as_any()
             .downcast_ref::<Int32Array>()
             .context("page column type")?;
+        let mut current_source = None;
+        let mut current_kind = SourceKind::Unsupported;
 
         for i in 0..batch.num_rows() {
             let source = source_col.value(i);
@@ -377,8 +379,12 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
             entry.chars += chars;
             entry.estimated_tokens += estimated_tokens;
 
-            if SourceKind::from_path(Path::new(source)) == SourceKind::Pdf && page_col.value(i) > 0
-            {
+            if current_source != Some(source) {
+                current_source = Some(source);
+                current_kind = SourceKind::from_path(Path::new(source));
+            }
+
+            if current_kind == SourceKind::Pdf && page_col.value(i) > 0 {
                 pdf_pages.insert((source.to_string(), page_col.value(i)));
             }
         }

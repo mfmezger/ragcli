@@ -161,22 +161,39 @@ async fn extract_units(
             let text = load_html_file(path)?;
             Ok(vec![ExtractedUnit {
                 page_num: 0,
-                chunks: chunk_document_text(&text, "html", None, chunk_size, overlap),
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("html has format label"),
+                    None,
+                    chunk_size,
+                    overlap,
+                ),
             }])
         }
         SourceKind::Csv { delimiter } => {
             let text = load_delimited_file(path, delimiter)?;
-            let format = if delimiter == b'\t' { "tsv" } else { "csv" };
             Ok(vec![ExtractedUnit {
                 page_num: 0,
-                chunks: chunk_document_text(&text, format, None, chunk_size, overlap),
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("csv has format label"),
+                    None,
+                    chunk_size,
+                    overlap,
+                ),
             }])
         }
         SourceKind::Code { language } => {
             let text = load_text_file(path)?;
             Ok(vec![ExtractedUnit {
                 page_num: 0,
-                chunks: chunk_document_text(&text, "code", Some(language), chunk_size, overlap),
+                chunks: chunk_document_text(
+                    &text,
+                    kind.format_label().expect("code has format label"),
+                    Some(language),
+                    chunk_size,
+                    overlap,
+                ),
             }])
         }
         SourceKind::Pdf => {
