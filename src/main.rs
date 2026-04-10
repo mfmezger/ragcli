@@ -39,6 +39,8 @@ async fn main() -> Result<()> {
             chunk_overlap,
             embed_model,
             pdf_parser,
+            exclude,
+            include_hidden,
         } => {
             cmd_index(
                 name,
@@ -47,6 +49,8 @@ async fn main() -> Result<()> {
                 chunk_overlap,
                 embed_model,
                 pdf_parser,
+                exclude,
+                include_hidden,
             )
             .await?
         }
@@ -75,6 +79,8 @@ async fn cmd_index(
     chunk_overlap: Option<usize>,
     embed_model: Option<String>,
     pdf_parser: Option<PdfParserArg>,
+    exclude: Vec<String>,
+    include_hidden: bool,
 ) -> Result<()> {
     let started = Instant::now();
     let store = store_dir(name)?;
@@ -103,6 +109,8 @@ async fn cmd_index(
             PdfParserArg::Native => PdfParser::Native,
             PdfParserArg::Liteparse => PdfParser::Liteparse,
         },
+        &exclude,
+        include_hidden,
     )
     .await?;
 
@@ -586,9 +594,18 @@ mod tests {
 
         let index_server = sequential_json_server(vec![r#"{"embeddings":[[0.1,0.2]]}"#]);
         with_test_env(dir.path(), Some(&index_server), || async {
-            cmd_index(Some("e2e"), input.clone(), Some(200), Some(0), None, None)
-                .await
-                .unwrap();
+            cmd_index(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+            )
+            .await
+            .unwrap();
             cmd_stat(Some("e2e")).await.unwrap();
         })
         .await;
