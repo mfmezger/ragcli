@@ -6,7 +6,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 
 ## Features
 
-- local text, Markdown, PDF, and image indexing
+- local text, Markdown, HTML, CSV/TSV, source code, PDF, and image indexing
 - local embedding and generation through Ollama
 - hybrid retrieval with LanceDB vector search + BM25 full-text search
 - persistent per-store data under `~/.config/ragcli/<name>`
@@ -41,6 +41,7 @@ Index a directory or file:
 cargo run -- index ./docs
 cargo run -- index ./My_Neighbor_Totoro.pdf
 cargo run -- index ./images
+cargo run -- index . --exclude '**/target/**' --exclude '**/.git/**'
 ```
 
 Use a named store:
@@ -109,6 +110,16 @@ cargo run -- config set models.embed nomic-embed-text-v2-moe:latest
 cargo run -- config set ollama.base_url http://localhost:11434
 ```
 
+Supported indexable formats currently include:
+
+- plain text: `.txt`, `.rst`
+- Markdown: `.md`, `.markdown`
+- HTML: `.html`, `.htm`
+- tabular text: `.csv`, `.tsv`
+- source/config text: `.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.java`, `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hpp`, `.sh`, `.bash`, `.toml`, `.yaml`, `.yml`, `.json`
+- PDF: `.pdf`
+- images: `.png`, `.jpg`, `.jpeg`, `.webp`
+
 ## Storage
 
 Each store lives under:
@@ -127,7 +138,10 @@ Each store lives under:
 ## Behavior Notes
 
 - Re-indexing replaces existing rows for the same `source_path`.
-- Text files are decoded lossily, so non-UTF-8 files do not abort indexing.
+- Text and source files are decoded lossily, so non-UTF-8 files do not abort indexing.
+- Hidden files and directories are skipped during directory traversal unless `--include-hidden` is set.
+- `index --exclude <glob>` can be repeated to skip unwanted files or directories.
+- HTML is converted to readable text before chunking, and CSV/TSV rows are flattened into labeled text.
 - Images are captioned with an Ollama vision model at index time and stored as text for retrieval.
 - Queries use LanceDB hybrid search: semantic nearest-neighbor search plus BM25 full-text search on `chunk_text`.
 - Querying refuses to mix a store with a different embedding model than the one used to build it.
