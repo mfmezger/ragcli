@@ -285,11 +285,17 @@ fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
         .map(|candidate| {
             format!(
                 "source={} page={} text={}",
-                candidate.source_path, candidate.page, candidate.chunk_text
+                candidate.source_path,
+                candidate.page,
+                normalize_summary_text(&candidate.chunk_text)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_summary_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn parse_question_type(value: &str) -> Result<QuestionType> {
@@ -389,5 +395,11 @@ mod tests {
         ]);
 
         assert!(summary.contains("source=g page=0 text=seven"));
+    }
+
+    #[test]
+    fn test_summarize_candidates_normalizes_newlines_and_spaces() {
+        let summary = summarize_candidates(&[candidate("src/a.rs", "one\n\n two\tthree")]);
+        assert!(summary.contains("source=src/a.rs page=0 text=one two three"));
     }
 }

@@ -192,7 +192,6 @@ async fn run_agentic_query_command(
     let mut iterations = Vec::new();
     let mut previous_keys = Vec::new();
     let mut active_queries = initial_agent_queries(&command.question, &plan, &rewrite_set);
-    let mut hits = Vec::new();
     let mut accumulated_hits = Vec::new();
 
     for iteration in 1..=command.max_iterations.max(1) {
@@ -202,7 +201,7 @@ async fn run_agentic_query_command(
         ));
         let iteration_hits =
             retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
-        hits = iteration_hits.clone();
+        let retrieved_count = iteration_hits.len();
         accumulated_hits = merge_candidates([accumulated_hits, iteration_hits]);
         let kept_hits = prune_candidates(accumulated_hits.clone(), command.top_k);
         let assessment = match assess_evidence(&generator, &command.question, &kept_hits).await {
@@ -219,7 +218,7 @@ async fn run_agentic_query_command(
         iterations.push(AgentIteration {
             iteration,
             query_variants: active_queries.clone(),
-            retrieved_count: hits.len(),
+            retrieved_count,
             kept_count: kept_hits.len(),
             sufficiency: assessment.verdict.clone(),
             notes: notes.clone(),
@@ -266,7 +265,7 @@ async fn run_agentic_query_command(
                     "support verification failed; using heuristic fallback ({})",
                     err.root_cause()
                 ));
-                fallback_support_check(&answer, &hits)
+                fallback_support_check(&answer, &final_hits)
             }
         };
     if support_check.supported {
