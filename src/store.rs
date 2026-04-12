@@ -318,7 +318,7 @@ pub fn build_retrieval_filter(
 
     if let Some(path_prefix) = path_prefix {
         clauses.push(format!(
-            "source_path LIKE {} ESCAPE '\\\\'",
+            "source_path LIKE {} ESCAPE '\\'",
             sql_like_prefix(path_prefix)
         ));
     }
@@ -731,7 +731,7 @@ mod tests {
 
         assert_eq!(
             filter,
-            "source_path = 'docs/it''s.txt' AND source_path LIKE 'docs/\\_v1\\%/%' ESCAPE '\\\\' AND page = 3 AND format = 'markdown'"
+            "source_path = 'docs/it''s.txt' AND source_path LIKE 'docs/\\_v1\\%/%' ESCAPE '\\' AND page = 3 AND format = 'markdown'"
         );
     }
 
