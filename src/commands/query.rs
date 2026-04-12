@@ -511,17 +511,19 @@ async fn rerank_with_model(
         )
         .await
         .context("generate rerank JSON")?;
-    let ranked_ids = parse_rerank_payload(&response)?;
+    let ranked_positions = parse_rerank_payload(&response)?;
+    let ranked_ids = resolve_rerank_positions(candidates, &ranked_positions);
     Ok(apply_rerank_order(candidates, &ranked_ids, top_n))
 }
 
 fn build_rerank_prompt(question: &str, candidates: &[RetrievalCandidate]) -> String {
     let items = candidates
         .iter()
-        .map(|candidate| {
+        .enumerate()
+        .map(|(idx, candidate)| {
             format!(
                 "id={}\nsource={}\ntext={}",
-                candidate.dedupe_key(),
+                idx + 1,
                 candidate.source_path,
                 truncate_for_rerank(&candidate.chunk_text)
             )
@@ -533,6 +535,7 @@ fn build_rerank_prompt(question: &str, candidates: &[RetrievalCandidate]) -> Str
         concat!(
             "Return a JSON object with key ranked_ids. ",
             "ranked_ids must be an array of objects with keys id and score. ",
+            "Use the numeric candidate ids exactly as provided. ",
             "Include only the most relevant candidates in descending order.\n\n",
             "Question: {}\n\nCandidates:\n{}"
         ),
@@ -540,15 +543,30 @@ fn build_rerank_prompt(question: &str, candidates: &[RetrievalCandidate]) -> Str
     )
 }
 
-fn parse_rerank_payload(raw: &str) -> Result<Vec<(String, f32)>> {
+fn parse_rerank_payload(raw: &str) -> Result<Vec<(usize, f32)>> {
     let trimmed = trim_json_fences(raw);
     let payload: RerankPayload = serde_json::from_str(trimmed).context("parse rerank JSON")?;
     Ok(payload
         .ranked_ids
         .into_iter()
-        .map(|item| (item.id.trim().to_string(), item.score))
-        .filter(|(id, _)| !id.is_empty())
+        .filter_map(|item| {
+            let id = item.id.trim().parse::<usize>().ok()?;
+            Some((id, item.score))
+        })
         .collect())
+}
+
+fn resolve_rerank_positions(
+    candidates: &[RetrievalCandidate],
+    ranked_positions: &[(usize, f32)],
+) -> Vec<(String, f32)> {
+    ranked_positions
+        .iter()
+        .filter_map(|(position, score)| {
+            let candidate = candidates.get(position.saturating_sub(1))?;
+            Some((candidate.dedupe_key(), *score))
+        })
+        .collect()
 }
 
 fn truncate_for_rerank(text: &str) -> String {
@@ -721,11 +739,47 @@ mod tests {
     #[test]
     fn test_parse_rerank_payload_accepts_json_fences() {
         let ranked = parse_rerank_payload(
-            "```json\n{\"ranked_ids\":[{\"id\":\"a\",\"score\":0.9},{\"id\":\"b\",\"score\":0.3}]}\n```",
+            "```json\n{\"ranked_ids\":[{\"id\":\"1\",\"score\":0.9},{\"id\":\"2\",\"score\":0.3}]}\n```",
         )
         .unwrap();
 
-        assert_eq!(ranked, vec![("a".to_string(), 0.9), ("b".to_string(), 0.3)]);
+        assert_eq!(ranked, vec![(1, 0.9), (2, 0.3)]);
+    }
+
+    #[test]
+    fn test_resolve_rerank_positions_maps_numeric_ids_to_candidates() {
+        let candidates = vec![
+            RetrievalCandidate {
+                id: "alpha".to_string(),
+                source_path: "src/a.rs".to_string(),
+                chunk_text: "a".to_string(),
+                metadata: String::new(),
+                page: 0,
+                chunk_index: 0,
+                vector_score: Some(0.1),
+                keyword_score: None,
+                fused_score: Some(0.1),
+                rerank_score: None,
+            },
+            RetrievalCandidate {
+                id: "beta".to_string(),
+                source_path: "src/b.rs".to_string(),
+                chunk_text: "b".to_string(),
+                metadata: String::new(),
+                page: 0,
+                chunk_index: 1,
+                vector_score: Some(0.2),
+                keyword_score: None,
+                fused_score: Some(0.2),
+                rerank_score: None,
+            },
+        ];
+
+        let resolved = resolve_rerank_positions(&candidates, &[(2, 0.8), (1, 0.4)]);
+        assert_eq!(
+            resolved,
+            vec![("beta".to_string(), 0.8), ("alpha".to_string(), 0.4)]
+        );
     }
 
     #[test]
