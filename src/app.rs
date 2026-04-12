@@ -31,10 +31,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             question,
             top_k,
             show_context,
+            source,
+            path_prefix,
+            page,
+            format,
             gen_model,
             max_tokens,
         } => {
-            commands::query::run(name, question, top_k, show_context, gen_model, max_tokens).await?
+            commands::query::run(
+                name,
+                question,
+                top_k,
+                show_context,
+                source,
+                path_prefix,
+                page,
+                format,
+                gen_model,
+                max_tokens,
+            )
+            .await?
         }
         Command::Config { command } => match command {
             ConfigCommand::Show => commands::config::show(name).await?,

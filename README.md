@@ -59,6 +59,10 @@ Inspect retrieved context before generation:
 
 ```bash
 cargo run -- query "What is My Neighbor Totoro about?" --show-context
+cargo run -- query "Summarize this file" --source ./notes/today.md
+cargo run -- query "What happens on this page?" --source ./My_Neighbor_Totoro.pdf --page 3
+cargo run -- query "What changed in the docs?" --path-prefix ./docs/
+cargo run -- query "Summarize the markdown notes" --format markdown
 ```
 
 Check local setup:
@@ -137,7 +141,9 @@ Each store lives under:
   config.toml
 ```
 
-`meta/store.toml` records the embedding model, embedding dimension, and chunk settings used to build the store.
+`meta/store.toml` records the embedding model, embedding dimension, chunk settings, and store schema version used to build the store.
+
+When upgrading across store schema changes, reindex into a fresh store or remove the old store before indexing again.
 
 ## Behavior Notes
 
@@ -148,6 +154,7 @@ Each store lives under:
 - HTML is converted to readable text before chunking, and CSV/TSV rows are flattened into labeled text.
 - Images are captioned with an Ollama vision model at index time and stored as text for retrieval.
 - Queries use LanceDB hybrid search: semantic nearest-neighbor search plus BM25 full-text search on `chunk_text`.
+- Query-time retrieval filters support `--source`, `--path-prefix`, `--page`, and `--format`.
 - Querying refuses to mix a store with a different embedding model than the one used to build it.
 - Ollama chat requests are sent with `think: false` to reduce hangs with reasoning-capable models.
 
