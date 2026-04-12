@@ -8,6 +8,7 @@ use crate::cli::QueryModeArg;
 use crate::config::{
     ensure_store_layout, load_or_create_config, resolve_model_name, store_dir, Config,
 };
+use crate::graph::placeholder_plan;
 use crate::models::{Embedder, Generator};
 use crate::retrieval::{
     apply_rerank_order, merge_candidates, prune_candidates, RetrievalCandidate,
@@ -294,20 +295,18 @@ async fn run_agentic_stub_query_command(
     runtime: &QueryRuntime,
     command: &QueryCommand,
 ) -> Result<SimpleQueryResult> {
-    let mut trace = vec![
-        format!(
-            "requested {} mode routed through the graph-mode stub",
-            mode_label(command.mode)
-        ),
-        "current implementation falls back to the hybrid retrieval pipeline".to_string(),
-    ];
+    let mut trace = vec![format!(
+        "requested {} mode routed through the graph-mode placeholder path",
+        mode_label(command.mode)
+    )];
     let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-    let hits =
-        retrieve_candidates(runtime, command, &rewrite_set.query_variants(), &mut trace).await?;
+    let stub_plan = placeholder_plan(command.mode, &rewrite_set);
+    trace.extend(stub_plan.notes.iter().cloned());
+    let hits = retrieve_candidates(runtime, command, &stub_plan.query_variants, &mut trace).await?;
 
     Ok(SimpleQueryResult {
         requested_mode: command.mode,
-        execution_label: "hybrid",
+        execution_label: stub_plan.execution_label,
         rewrite_set,
         plan: None,
         iterations: Vec::new(),
@@ -1193,5 +1192,70 @@ mod tests {
             execution_path(QueryModeArg::Mix),
             QueryExecutionPath::AgenticStub
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_local_global_and_mix_modes_use_distinct_placeholder_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let input = docs.join("note.txt");
+        std::fs::write(&input, "Config checks use metadata validation.").unwrap();
+
+        let index_server = sequential_json_server(vec![r#"{"embeddings":[[0.1,0.2]]}"#]);
+        with_test_env(dir.path(), Some(&index_server), || async {
+            index::run(
+                Some("graph-modes"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        let query_server = sequential_json_server(vec![
+            r#"{"embeddings":[[0.1,0.2]]}"#,
+            r#"{"message":{"content":"local answer [1]"}}"#,
+            r#"{"embeddings":[[0.1,0.2]]}"#,
+            r#"{"message":{"content":"global answer [1]"}}"#,
+            r#"{"embeddings":[[0.1,0.2]]}"#,
+            r#"{"message":{"content":"mix answer [1]"}}"#,
+        ]);
+        with_test_env(dir.path(), Some(&query_server), || async {
+            for mode in [QueryModeArg::Local, QueryModeArg::Global, QueryModeArg::Mix] {
+                run(
+                    Some("graph-modes"),
+                    QueryCommand {
+                        question: "How do config checks work?".to_string(),
+                        mode,
+                        top_k: 5,
+                        fetch_k: 20,
+                        max_iterations: 2,
+                        rewrite: false,
+                        rerank: false,
+                        show_context: false,
+                        show_plan: false,
+                        show_scores: false,
+                        show_citations: false,
+                        show_trace: false,
+                        source: None,
+                        path_prefix: None,
+                        page: None,
+                        format: None,
+                        gen_model: None,
+                        max_tokens: 64,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+        })
+        .await;
     }
 }
