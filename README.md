@@ -1,5 +1,9 @@
 # ragcli
 
+[![Cargo Test](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml/badge.svg)](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml)
+[![Coverage](https://img.shields.io/badge/coverage-80%25%20required-brightgreen)](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml)
+[![Rust 2021](https://img.shields.io/badge/rust-2021-orange)](https://www.rust-lang.org/)
+
 `ragcli` is a small local RAG CLI written in Rust.
 
 It indexes local files into a persistent LanceDB store, uses Ollama for embeddings and generation, and stays intentionally simple so the whole flow is easy to inspect and extend.
