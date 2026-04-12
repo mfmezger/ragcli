@@ -3,7 +3,7 @@ name = "ragcli"
 version = "0.1.0"
 edition = "2021"
 
-description = "CLI for local RAG (storage layout + plumbing)"
+description = "CLI for local RAG"
 
 [package.metadata.release]
 allow-branch = ["main"]
