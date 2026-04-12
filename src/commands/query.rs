@@ -19,6 +19,7 @@ use arrow_array::{Float32Array, Float64Array, Int32Array, RecordBatch, StringArr
 use futures::TryStreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const RERANK_MAX_TEXT_CHARS: usize = 600;
@@ -192,21 +193,26 @@ async fn run_agentic_query_command(
     let mut previous_keys = Vec::new();
     let mut active_queries = initial_agent_queries(&command.question, &plan, &rewrite_set);
     let mut hits = Vec::new();
+    let mut accumulated_hits = Vec::new();
 
     for iteration in 1..=command.max_iterations.max(1) {
         trace.push(format!(
             "iteration {iteration}: querying {} variant(s)",
             active_queries.len()
         ));
-        hits = retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
-        let assessment = match assess_evidence(&generator, &command.question, &hits).await {
+        let iteration_hits =
+            retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
+        hits = iteration_hits.clone();
+        accumulated_hits = merge_candidates([accumulated_hits, iteration_hits]);
+        let kept_hits = prune_candidates(accumulated_hits.clone(), command.top_k);
+        let assessment = match assess_evidence(&generator, &command.question, &kept_hits).await {
             Ok(assessment) => assessment,
             Err(err) => {
                 trace.push(format!(
                     "evidence assessment failed; using heuristic fallback ({})",
                     err.root_cause()
                 ));
-                fallback_evidence_assessment(&hits)
+                fallback_evidence_assessment(&kept_hits)
             }
         };
         let notes = assessment_notes(&assessment);
@@ -214,7 +220,7 @@ async fn run_agentic_query_command(
             iteration,
             query_variants: active_queries.clone(),
             retrieved_count: hits.len(),
-            kept_count: hits.len(),
+            kept_count: kept_hits.len(),
             sufficiency: assessment.verdict.clone(),
             notes: notes.clone(),
         });
@@ -231,7 +237,10 @@ async fn run_agentic_query_command(
             break;
         }
 
-        let current_keys = hits.iter().map(|hit| hit.dedupe_key()).collect::<Vec<_>>();
+        let current_keys = kept_hits
+            .iter()
+            .map(|hit| hit.dedupe_key())
+            .collect::<Vec<_>>();
         if !previous_keys.is_empty() && current_keys == previous_keys {
             trace.push("retrieval produced no material evidence change; halting".to_string());
             break;
@@ -247,9 +256,10 @@ async fn run_agentic_query_command(
         active_queries = next_queries;
     }
 
-    let answer = generate_answer_from_hits(runtime, command, &hits).await?;
+    let final_hits = prune_candidates(accumulated_hits, command.top_k);
+    let answer = generate_answer_from_hits(runtime, command, &final_hits).await?;
     let support_check =
-        match verify_answer_support(&generator, &command.question, &answer, &hits).await {
+        match verify_answer_support(&generator, &command.question, &answer, &final_hits).await {
             Ok(check) => check,
             Err(err) => {
                 trace.push(format!(
@@ -276,7 +286,7 @@ async fn run_agentic_query_command(
         iterations,
         support_check: Some(support_check),
         answer: Some(answer),
-        hits,
+        hits: final_hits,
         trace,
     })
 }
@@ -769,7 +779,7 @@ fn initial_agent_queries(
     }
     .into_iter()
     .chain(std::iter::once(question.to_string()))
-    .collect::<std::collections::BTreeSet<_>>()
+    .collect::<BTreeSet<_>>()
     .into_iter()
     .collect()
 }
@@ -786,7 +796,7 @@ fn refine_agent_queries(
             .iter()
             .cloned()
             .chain(std::iter::once(question.to_string()))
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
     }
@@ -797,7 +807,7 @@ fn refine_agent_queries(
             .iter()
             .cloned()
             .chain(rewrite_set.query_variants())
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
     }

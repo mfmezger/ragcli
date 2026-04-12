@@ -1,5 +1,6 @@
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
+use crate::rewrite::trim_json_fences;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -281,7 +282,6 @@ pub fn parse_support_check(raw: &str) -> Result<SupportCheck> {
 fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
     candidates
         .iter()
-        .take(6)
         .map(|candidate| {
             format!(
                 "source={} page={} text={}",
@@ -293,22 +293,22 @@ fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
 }
 
 fn parse_question_type(value: &str) -> Result<QuestionType> {
-    match value.trim() {
-        "Lookup" => Ok(QuestionType::Lookup),
-        "Compare" => Ok(QuestionType::Compare),
-        "MultiHop" => Ok(QuestionType::MultiHop),
-        "Summary" => Ok(QuestionType::Summary),
-        "Exploratory" => Ok(QuestionType::Exploratory),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lookup" => Ok(QuestionType::Lookup),
+        "compare" => Ok(QuestionType::Compare),
+        "multihop" => Ok(QuestionType::MultiHop),
+        "summary" => Ok(QuestionType::Summary),
+        "exploratory" => Ok(QuestionType::Exploratory),
         other => anyhow::bail!("unknown question type: {other}"),
     }
 }
 
 fn parse_retrieval_strategy(value: &str) -> Result<RetrievalStrategy> {
-    match value.trim() {
-        "Direct" => Ok(RetrievalStrategy::Direct),
-        "Rewrite" => Ok(RetrievalStrategy::Rewrite),
-        "Decompose" => Ok(RetrievalStrategy::Decompose),
-        "BroadThenRerank" => Ok(RetrievalStrategy::BroadThenRerank),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "direct" => Ok(RetrievalStrategy::Direct),
+        "rewrite" => Ok(RetrievalStrategy::Rewrite),
+        "decompose" => Ok(RetrievalStrategy::Decompose),
+        "broadthenrerank" => Ok(RetrievalStrategy::BroadThenRerank),
         other => anyhow::bail!("unknown retrieval strategy: {other}"),
     }
 }
@@ -320,23 +320,6 @@ fn parse_evidence_verdict(value: &str) -> Result<EvidenceVerdict> {
         "insufficient" => Ok(EvidenceVerdict::Insufficient),
         other => anyhow::bail!("unknown evidence verdict: {other}"),
     }
-}
-
-fn trim_json_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if !trimmed.starts_with("```") {
-        return trimmed;
-    }
-
-    let without_prefix = trimmed
-        .trim_start_matches("```")
-        .trim_start_matches("json")
-        .trim();
-
-    without_prefix
-        .strip_suffix("```")
-        .unwrap_or(without_prefix)
-        .trim()
 }
 
 #[cfg(test)]
@@ -380,5 +363,31 @@ mod tests {
     fn test_parse_support_check_errors_on_invalid_json() {
         let err = parse_support_check("not json").unwrap_err().to_string();
         assert!(err.contains("parse support check JSON"));
+    }
+
+    #[test]
+    fn test_parse_query_plan_accepts_case_insensitive_values() {
+        let plan = parse_query_plan(
+            "{\"question_type\":\"lookup\",\"strategy\":\"decompose\",\"reasoning\":\"ok\",\"subqueries\":[]}",
+        )
+        .unwrap();
+
+        assert_eq!(plan.question_type, QuestionType::Lookup);
+        assert_eq!(plan.strategy, RetrievalStrategy::Decompose);
+    }
+
+    #[test]
+    fn test_summarize_candidates_includes_all_candidates() {
+        let summary = summarize_candidates(&[
+            candidate("a", "one"),
+            candidate("b", "two"),
+            candidate("c", "three"),
+            candidate("d", "four"),
+            candidate("e", "five"),
+            candidate("f", "six"),
+            candidate("g", "seven"),
+        ]);
+
+        assert!(summary.contains("source=g page=0 text=seven"));
     }
 }
