@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod fsutil;
 mod ingest;
 mod models;
 mod source_kind;

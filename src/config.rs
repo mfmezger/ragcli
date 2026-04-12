@@ -1,5 +1,6 @@
 //! Configuration loading, persistence, and environment overrides.
 
+use crate::fsutil::write_atomic;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -183,14 +184,14 @@ pub fn load_or_create_file_config(store: &Path) -> Result<Config> {
 
     let cfg = Config::default();
     let raw = toml::to_string_pretty(&cfg)?;
-    fs::write(&path, raw)?;
+    write_atomic(&path, &raw)?;
     Ok(cfg)
 }
 
 /// Writes a config file for the given store.
 pub fn save_config(store: &Path, cfg: &Config) -> Result<()> {
     let raw = toml::to_string_pretty(cfg)?;
-    fs::write(config_path(store), raw)?;
+    write_atomic(&config_path(store), &raw)?;
     Ok(())
 }
 

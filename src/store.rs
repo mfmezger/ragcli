@@ -1,5 +1,6 @@
 //! LanceDB storage helpers and store metadata utilities.
 
+use crate::fsutil::write_atomic;
 use crate::source_kind::{ContentCategory, SourceKind};
 use anyhow::{bail, Context, Result};
 use arrow_array::types::Float32Type;
@@ -178,7 +179,7 @@ pub fn ensure_metadata(
     }
 
     let raw = toml::to_string_pretty(&next)?;
-    fs::write(path, raw)?;
+    write_atomic(&path, &raw)?;
     Ok(())
 }
 
@@ -571,5 +572,24 @@ mod tests {
         assert_eq!(stats.pdf_pages, 2);
         assert_eq!(stats.top_sources[0].source_path, "paper.pdf");
         assert_eq!(stats.top_sources[0].chunks, 2);
+    }
+
+    #[test]
+    fn test_ensure_metadata_writes_file_without_temp_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(store.join("meta")).unwrap();
+
+        ensure_metadata(&store, "embed-x", 768, 1000, 200).unwrap();
+
+        let metadata = load_metadata(&store).unwrap();
+        assert_eq!(metadata.embed_model, "embed-x");
+        assert_eq!(metadata.embedding_dim, 768);
+
+        let entries = fs::read_dir(store.join("meta"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec!["store.toml"]);
     }
 }

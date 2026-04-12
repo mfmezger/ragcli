@@ -18,6 +18,7 @@ pre-release-hook = ["git-cliff", "--tag", "v{{version}}", "-o", "CHANGELOG.md"]
 
 [dependencies]
 anyhow = "1"
+atomicwrites = "0.4"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 csv = "1"
