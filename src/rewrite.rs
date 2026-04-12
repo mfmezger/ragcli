@@ -95,7 +95,7 @@ fn parse_payload(raw: &str) -> Result<QueryRewritePayload> {
     serde_json::from_str(trimmed).context("deserialize rewrite JSON")
 }
 
-fn trim_json_fences(raw: &str) -> &str {
+pub fn trim_json_fences(raw: &str) -> &str {
     let trimmed = raw.trim();
     if !trimmed.starts_with("```") {
         return trimmed;
@@ -159,5 +159,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("parse query rewrite payload"));
+    }
+
+    #[test]
+    fn test_trim_json_fences_leaves_plain_json_untouched() {
+        assert_eq!(trim_json_fences("{\"a\":1}"), "{\"a\":1}");
     }
 }

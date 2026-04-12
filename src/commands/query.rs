@@ -7,7 +7,7 @@ use crate::models::{Embedder, Generator};
 use crate::retrieval::{
     apply_rerank_order, merge_candidates, prune_candidates, RetrievalCandidate,
 };
-use crate::rewrite::{rewrite_query_for_retrieval, QueryRewriteSet};
+use crate::rewrite::{rewrite_query_for_retrieval, trim_json_fences, QueryRewriteSet};
 use crate::store::{self, build_retrieval_filter, connect_db, ensure_fts_index, load_metadata};
 use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Float64Array, Int32Array, RecordBatch, StringArray};
@@ -15,6 +15,9 @@ use futures::TryStreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use std::path::PathBuf;
+
+const RERANK_MAX_TEXT_CHARS: usize = 600;
+const RERANK_RESPONSE_TOKENS: usize = 384;
 
 #[derive(Debug)]
 pub struct QueryCommand {
@@ -294,6 +297,8 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
             .and_then(|column| column.as_any().downcast_ref::<Int32Array>());
 
         for row in 0..batch.num_rows() {
+            let vector_score = vector_score_at(batch, row);
+            let fused_score = relevance_score_at(batch, row).or(vector_score);
             hits.push(RetrievalCandidate {
                 id: id_col
                     .map(|column| column.value(row).to_string())
@@ -307,9 +312,9 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
                 chunk_index: chunk_index_col
                     .map(|column| column.value(row))
                     .unwrap_or_default(),
-                vector_score: score_at(batch, row),
-                keyword_score: None,
-                fused_score: score_at(batch, row),
+                vector_score,
+                keyword_score: relevance_score_at(batch, row),
+                fused_score,
                 rerank_score: None,
             });
         }
@@ -318,8 +323,8 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
     Ok(hits)
 }
 
-fn score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
-    for name in ["_score", "score", "_distance", "distance"] {
+fn relevance_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
+    for name in ["_score", "score"] {
         let column = batch.column_by_name(name)?;
         if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
             return Some(values.value(row));
@@ -329,6 +334,29 @@ fn score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
         }
     }
     None
+}
+
+fn vector_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
+    if let Some(score) = relevance_score_at(batch, row) {
+        return Some(score);
+    }
+
+    for name in ["_distance", "distance"] {
+        let column = batch.column_by_name(name)?;
+        let distance = if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
+            values.value(row)
+        } else if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
+            values.value(row) as f32
+        } else {
+            continue;
+        };
+        return Some(distance_to_similarity(distance));
+    }
+    None
+}
+
+fn distance_to_similarity(distance: f32) -> f32 {
+    1.0 / (1.0 + distance.max(0.0))
 }
 
 fn print_query_plan(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -479,7 +507,7 @@ async fn rerank_with_model(
         .generate_json(
             "You rerank retrieval candidates for a local RAG CLI. Respond with strict JSON only and no markdown fences.",
             &prompt,
-            256,
+            RERANK_RESPONSE_TOKENS,
         )
         .await
         .context("generate rerank JSON")?;
@@ -495,7 +523,7 @@ fn build_rerank_prompt(question: &str, candidates: &[RetrievalCandidate]) -> Str
                 "id={}\nsource={}\ntext={}",
                 candidate.dedupe_key(),
                 candidate.source_path,
-                candidate.chunk_text
+                truncate_for_rerank(&candidate.chunk_text)
             )
         })
         .collect::<Vec<_>>()
@@ -523,21 +551,12 @@ fn parse_rerank_payload(raw: &str) -> Result<Vec<(String, f32)>> {
         .collect())
 }
 
-fn trim_json_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if !trimmed.starts_with("```") {
-        return trimmed;
+fn truncate_for_rerank(text: &str) -> String {
+    let mut truncated = text.chars().take(RERANK_MAX_TEXT_CHARS).collect::<String>();
+    if text.chars().count() > RERANK_MAX_TEXT_CHARS {
+        truncated.push_str("...");
     }
-
-    let without_prefix = trimmed
-        .trim_start_matches("```")
-        .trim_start_matches("json")
-        .trim();
-
-    without_prefix
-        .strip_suffix("```")
-        .unwrap_or(without_prefix)
-        .trim()
+    truncated
 }
 
 fn format_score(score: Option<f32>) -> String {
@@ -707,6 +726,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(ranked, vec![("a".to_string(), 0.9), ("b".to_string(), 0.3)]);
+    }
+
+    #[test]
+    fn test_distance_to_similarity_makes_smaller_distances_score_higher() {
+        assert!(distance_to_similarity(0.2) > distance_to_similarity(0.8));
+    }
+
+    #[test]
+    fn test_truncate_for_rerank_limits_candidate_text() {
+        let text = "a".repeat(RERANK_MAX_TEXT_CHARS + 25);
+        let truncated = truncate_for_rerank(&text);
+        assert_eq!(truncated.len(), RERANK_MAX_TEXT_CHARS + 3);
+        assert!(truncated.ends_with("..."));
     }
 
     #[test]
