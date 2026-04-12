@@ -21,7 +21,7 @@ use std::sync::Arc;
 pub const DEFAULT_TABLE_NAME: &str = "chunks";
 /// Default column used for full-text search indexing.
 pub const DEFAULT_FTS_COLUMN: &str = "chunk_text";
-const STORE_SCHEMA_VERSION: u32 = 1;
+const STORE_SCHEMA_VERSION: u32 = 2;
 
 /// In-memory representation of a chunk before it is written to LanceDB.
 #[derive(Debug)]

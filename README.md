@@ -137,7 +137,9 @@ Each store lives under:
   config.toml
 ```
 
-`meta/store.toml` records the embedding model, embedding dimension, and chunk settings used to build the store.
+`meta/store.toml` records the embedding model, embedding dimension, chunk settings, and store schema version used to build the store.
+
+When upgrading across store schema changes, reindex into a fresh store or remove the old store before indexing again.
 
 ## Behavior Notes
 
