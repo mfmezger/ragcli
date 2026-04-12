@@ -1,9 +1,11 @@
+mod agent;
 mod app;
 mod citation;
 mod cli;
 mod commands;
 mod config;
 mod fsutil;
+mod graph;
 mod ingest;
 mod models;
 mod retrieval;
