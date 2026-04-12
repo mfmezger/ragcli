@@ -4,12 +4,8 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
-#[cfg(test)]
-use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// Embedding client backed by Ollama's `/api/embed` endpoint.
@@ -41,8 +37,6 @@ pub struct OllamaClient {
 
 enum HttpClient {
     Reqwest(Client),
-    #[cfg(test)]
-    Middleware(ClientWithMiddleware),
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,15 +138,6 @@ impl Generator {
         }
     }
 
-    #[cfg(test)]
-    fn new_with_client(base_url: String, model: String, client: ClientWithMiddleware) -> Self {
-        Self {
-            client: HttpClient::Middleware(client),
-            base_url,
-            model,
-        }
-    }
-
     /// Generates an answer grounded in retrieved contexts.
     pub async fn generate_answer(
         &self,
@@ -160,10 +145,32 @@ impl Generator {
         question: &str,
         max_tokens: usize,
     ) -> Result<String> {
-        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let system_prompt = "You are a helpful assistant. Use the provided context to answer the question. If the answer is not in the context, say you don't know. Respond with only the final answer and no chain-of-thought.";
-        let user_prompt = build_user_prompt(contexts, question);
+        self.generate_with_prompts(
+            "You are a helpful assistant. Answer only from the provided evidence. Cite supported claims with bracketed evidence labels like [1] or [2]. If the evidence is insufficient, say you don't know. Respond with only the final answer and no chain-of-thought.",
+            &build_user_prompt(contexts, question),
+            max_tokens,
+        )
+        .await
+    }
 
+    /// Generates a strict-JSON response for structured tasks.
+    pub async fn generate_json(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: usize,
+    ) -> Result<String> {
+        self.generate_with_prompts(system_prompt, user_prompt, max_tokens)
+            .await
+    }
+
+    async fn generate_with_prompts(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: usize,
+    ) -> Result<String> {
+        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
         let request_body = serde_json::json!({
             "model": self.model,
             "stream": false,
@@ -261,12 +268,6 @@ impl HttpClient {
                 .send()
                 .await
                 .context("send HTTP GET request")?,
-            #[cfg(test)]
-            Self::Middleware(client) => client
-                .get(url)
-                .send()
-                .await
-                .context("send HTTP GET request")?,
         };
 
         let status = response.status();
@@ -285,14 +286,6 @@ impl HttpClient {
                 .post(url)
                 .header(CONTENT_TYPE, "application/json")
                 .body(body.clone())
-                .send()
-                .await
-                .context("send HTTP POST request")?,
-            #[cfg(test)]
-            Self::Middleware(client) => client
-                .post(url)
-                .header(CONTENT_TYPE, "application/json")
-                .body(body)
                 .send()
                 .await
                 .context("send HTTP POST request")?,
@@ -317,28 +310,9 @@ fn build_user_prompt(contexts: &[String], question: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest_middleware::ClientBuilder;
-    use reqwest_vcr::{VCRMiddleware, VCRMode};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
-
-    fn replay_client(cassette_name: &str) -> ClientWithMiddleware {
-        let cassette = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("cassettes")
-            .join(cassette_name);
-        let middleware = VCRMiddleware::try_from(cassette)
-            .expect("load VCR cassette")
-            .with_mode(VCRMode::Replay)
-            .with_modify_request(|request| {
-                request.headers.clear();
-            });
-
-        ClientBuilder::new(reqwest::Client::new())
-            .with(middleware)
-            .build()
-    }
 
     fn one_shot_server(status_line: &str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
@@ -415,22 +389,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_generate_answer_replays_from_cassette() {
-        let generator = Generator::new_with_client(
-            "http://ollama.test".to_string(),
-            "llama3.2".to_string(),
-            replay_client("ollama-chat-success.vcr.json"),
+    async fn test_generate_answer_success() {
+        let base_url = one_shot_server(
+            "200 OK",
+            r#"{"message":{"content":"A cat sits on a windowsill. [1]"}}"#,
         );
+        let generator = Generator::new(base_url, "llama3.2".to_string());
 
         let answer = generator
             .generate_answer(
-                &[String::from("A cat sits on a windowsill.")],
+                &[String::from(
+                    "[1] source=note.txt\nA cat sits on a windowsill.",
+                )],
                 "What animal is described?",
                 64,
             )
             .await
-            .expect("replay Ollama chat response");
+            .expect("generate Ollama chat response");
 
-        assert_eq!(answer, "A cat sits on a windowsill.");
+        assert_eq!(answer, "A cat sits on a windowsill. [1]");
     }
 }
