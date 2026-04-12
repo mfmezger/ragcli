@@ -76,7 +76,7 @@ mod tests {
     use crate::commands::index;
     use crate::test_support::{sequential_json_server, with_test_env};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_answers_from_indexed_store_with_mock_ollama() {
         let dir = tempfile::tempdir().unwrap();
         let docs = dir.path().join("docs");

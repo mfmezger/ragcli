@@ -83,7 +83,7 @@ mod tests {
     use crate::commands::stat;
     use crate::test_support::{sequential_json_server, with_test_env};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_indexes_file_with_mock_ollama() {
         let dir = tempfile::tempdir().unwrap();
         let docs = dir.path().join("docs");

@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use crate::test_support::{sequential_json_server, with_test_env};
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_succeeds_on_empty_store() {
         let dir = tempfile::tempdir().unwrap();
         with_test_env(dir.path(), None, || async {
@@ -84,7 +84,7 @@ mod tests {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_succeeds_with_reachable_mock_ollama() {
         let dir = tempfile::tempdir().unwrap();
         let server = sequential_json_server(vec![

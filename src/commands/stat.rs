@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(dir_size_bytes(dir.path()).unwrap(), 8);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_run_succeeds_on_empty_store() {
         let dir = tempfile::tempdir().unwrap();
         with_test_env(dir.path(), None, || async {

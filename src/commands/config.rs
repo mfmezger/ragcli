@@ -43,7 +43,7 @@ mod tests {
     use crate::config::load_or_create_file_config;
     use crate::test_support::with_test_env;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_set_and_show_succeed_for_named_store() {
         let dir = tempfile::tempdir().unwrap();
         with_test_env(dir.path(), None, || async {
