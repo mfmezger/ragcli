@@ -156,7 +156,7 @@ When upgrading across store schema changes, reindex into a fresh store or remove
 - `index --exclude <glob>` can be repeated to skip unwanted files or directories.
 - HTML is converted to readable text before chunking, and CSV/TSV rows are flattened into labeled text.
 - Images are captioned with an Ollama vision model at index time and stored as text for retrieval.
-- Queries support `--mode naive|hybrid|agentic|local|global|mix`; today `hybrid` preserves the current behavior, while the other advanced modes route through explicit placeholder hooks that currently fall back to hybrid retrieval.
+- Queries support `--mode naive|hybrid|agentic|local|global|mix`; `agentic` runs the iterative Ralph-style retrieval loop, while `local`, `global`, and `mix` use distinct placeholder graph-mode paths that still fall back to hybrid retrieval until graph indexing lands.
 - Queries use LanceDB hybrid search: semantic nearest-neighbor search plus BM25 full-text search on `chunk_text`.
 - Query-time retrieval filters support `--source`, `--path-prefix`, `--page`, and `--format`.
 - Querying refuses to mix a store with a different embedding model than the one used to build it.
