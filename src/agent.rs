@@ -4,6 +4,8 @@ use crate::rewrite::trim_json_fences;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+const SUMMARY_TEXT_MAX_CHARS: usize = 600;
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentQueryConfig {
@@ -287,15 +289,23 @@ fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
                 "source={} page={} text={}",
                 candidate.source_path,
                 candidate.page,
-                normalize_summary_text(&candidate.chunk_text)
+                summarize_candidate_text(&candidate.chunk_text)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn normalize_summary_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+fn summarize_candidate_text(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut truncated = normalized
+        .chars()
+        .take(SUMMARY_TEXT_MAX_CHARS)
+        .collect::<String>();
+    if normalized.chars().count() > SUMMARY_TEXT_MAX_CHARS {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 fn parse_question_type(value: &str) -> Result<QuestionType> {
@@ -401,5 +411,13 @@ mod tests {
     fn test_summarize_candidates_normalizes_newlines_and_spaces() {
         let summary = summarize_candidates(&[candidate("src/a.rs", "one\n\n two\tthree")]);
         assert!(summary.contains("source=src/a.rs page=0 text=one two three"));
+    }
+
+    #[test]
+    fn test_summarize_candidate_text_truncates_long_chunks() {
+        let text = format!("{} tail", "a".repeat(SUMMARY_TEXT_MAX_CHARS + 20));
+        let summarized = summarize_candidate_text(&text);
+        assert_eq!(summarized.len(), SUMMARY_TEXT_MAX_CHARS + 3);
+        assert!(summarized.ends_with("..."));
     }
 }
