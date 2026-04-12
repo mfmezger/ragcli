@@ -18,7 +18,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 - compatibility checks for embedding model + chunk settings
 - `doctor` checks for store state, Ollama reachability, and installed models
 - `stat` summarizes indexed content, approximate embedded token volume, and store disk usage
-- optional retrieval inspection with `query --show-context`
+- query modes with inspectable retrieval output via `--mode`, `--show-plan`, `--show-scores`, `--show-citations`, and `--show-trace`
 
 ## Quick Start
 
@@ -63,6 +63,9 @@ cargo run -- query "Summarize this file" --source ./notes/today.md
 cargo run -- query "What happens on this page?" --source ./My_Neighbor_Totoro.pdf --page 3
 cargo run -- query "What changed in the docs?" --path-prefix ./docs/
 cargo run -- query "Summarize the markdown notes" --format markdown
+cargo run -- query "What is this project about?" --mode hybrid --show-plan
+cargo run -- query "Summarize the release notes" --mode agentic --show-trace
+cargo run -- query "Which file mentions Totoro?" --show-citations --show-scores
 ```
 
 Check local setup:
@@ -153,6 +156,7 @@ When upgrading across store schema changes, reindex into a fresh store or remove
 - `index --exclude <glob>` can be repeated to skip unwanted files or directories.
 - HTML is converted to readable text before chunking, and CSV/TSV rows are flattened into labeled text.
 - Images are captioned with an Ollama vision model at index time and stored as text for retrieval.
+- Queries support `--mode naive|hybrid|agentic|local|global|mix`; today `hybrid` preserves the current behavior, while the other advanced modes route through explicit placeholder hooks that currently fall back to hybrid retrieval.
 - Queries use LanceDB hybrid search: semantic nearest-neighbor search plus BM25 full-text search on `chunk_text`.
 - Query-time retrieval filters support `--source`, `--path-prefix`, `--page`, and `--format`.
 - Querying refuses to mix a store with a different embedding model than the one used to build it.

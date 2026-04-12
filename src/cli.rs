@@ -10,6 +10,17 @@ pub enum PdfParserArg {
     Liteparse,
 }
 
+/// Retrieval mode used during querying.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum QueryModeArg {
+    Naive,
+    Hybrid,
+    Agentic,
+    Local,
+    Global,
+    Mix,
+}
+
 /// Top-level CLI arguments.
 #[derive(Parser, Debug)]
 #[command(name = "ragcli", about = "RAG CLI powered by Ollama.")]
@@ -53,12 +64,39 @@ pub enum Command {
     Query {
         /// Natural-language question to ask.
         question: String,
+        /// Retrieval mode used for the query path.
+        #[arg(long, default_value = "hybrid")]
+        mode: QueryModeArg,
         /// Number of results to retrieve before generation.
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+        /// Number of candidates to overfetch before later pruning or reranking.
+        #[arg(long, default_value_t = 20)]
+        fetch_k: usize,
+        /// Maximum number of Ralph-style retrieval iterations.
+        #[arg(long, default_value_t = 2)]
+        max_iterations: usize,
+        /// Enables retrieval-oriented query rewriting.
+        #[arg(long, default_value_t = false)]
+        rewrite: bool,
+        /// Enables reranking after retrieval.
+        #[arg(long, default_value_t = false)]
+        rerank: bool,
         /// Prints retrieved context snippets before answering.
         #[arg(long, default_value_t = false)]
         show_context: bool,
+        /// Prints the selected retrieval plan.
+        #[arg(long, default_value_t = false)]
+        show_plan: bool,
+        /// Prints retrieval scores for selected contexts.
+        #[arg(long, default_value_t = false)]
+        show_scores: bool,
+        /// Prints selected evidence sources and labels.
+        #[arg(long, default_value_t = false)]
+        show_citations: bool,
+        /// Prints per-iteration retrieval trace details.
+        #[arg(long, default_value_t = false)]
+        show_trace: bool,
         /// Restricts retrieval to a single indexed source path.
         #[arg(long)]
         source: Option<String>,
@@ -102,4 +140,78 @@ pub enum ConfigCommand {
         /// New value to write.
         value: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_mode_and_inspection_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "ragcli",
+            "query",
+            "What is this?",
+            "--mode",
+            "agentic",
+            "--rewrite",
+            "--rerank",
+            "--show-plan",
+            "--show-scores",
+            "--show-citations",
+            "--show-trace",
+            "--fetch-k",
+            "12",
+            "--max-iterations",
+            "4",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Query {
+                question,
+                mode,
+                rewrite,
+                rerank,
+                show_plan,
+                show_scores,
+                show_citations,
+                show_trace,
+                fetch_k,
+                max_iterations,
+                ..
+            } => {
+                assert_eq!(question, "What is this?");
+                assert_eq!(mode, QueryModeArg::Agentic);
+                assert!(rewrite);
+                assert!(rerank);
+                assert!(show_plan);
+                assert!(show_scores);
+                assert!(show_citations);
+                assert!(show_trace);
+                assert_eq!(fetch_k, 12);
+                assert_eq!(max_iterations, 4);
+            }
+            command => panic!("expected query command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn test_query_mode_defaults_to_hybrid() {
+        let cli = Cli::try_parse_from(["ragcli", "query", "What is this?"]).unwrap();
+
+        match cli.command {
+            Command::Query {
+                mode,
+                fetch_k,
+                max_iterations,
+                ..
+            } => {
+                assert_eq!(mode, QueryModeArg::Hybrid);
+                assert_eq!(fetch_k, 20);
+                assert_eq!(max_iterations, 2);
+            }
+            command => panic!("expected query command, got {command:?}"),
+        }
+    }
 }

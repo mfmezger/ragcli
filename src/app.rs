@@ -29,8 +29,17 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Command::Query {
             question,
+            mode,
             top_k,
+            fetch_k,
+            max_iterations,
+            rewrite,
+            rerank,
             show_context,
+            show_plan,
+            show_scores,
+            show_citations,
+            show_trace,
             source,
             path_prefix,
             page,
@@ -40,15 +49,26 @@ pub async fn run(cli: Cli) -> Result<()> {
         } => {
             commands::query::run(
                 name,
-                question,
-                top_k,
-                show_context,
-                source,
-                path_prefix,
-                page,
-                format,
-                gen_model,
-                max_tokens,
+                commands::query::QueryCommand {
+                    question,
+                    mode,
+                    top_k,
+                    fetch_k,
+                    max_iterations,
+                    rewrite,
+                    rerank,
+                    show_context,
+                    show_plan,
+                    show_scores,
+                    show_citations,
+                    show_trace,
+                    source,
+                    path_prefix,
+                    page,
+                    format,
+                    gen_model,
+                    max_tokens,
+                },
             )
             .await?
         }
