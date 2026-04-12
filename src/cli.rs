@@ -59,6 +59,18 @@ pub enum Command {
         /// Prints retrieved context snippets before answering.
         #[arg(long, default_value_t = false)]
         show_context: bool,
+        /// Restricts retrieval to a single indexed source path.
+        #[arg(long)]
+        source: Option<String>,
+        /// Restricts retrieval to indexed source paths under the given prefix.
+        #[arg(long)]
+        path_prefix: Option<String>,
+        /// Restricts retrieval to a specific page number.
+        #[arg(long)]
+        page: Option<i32>,
+        /// Restricts retrieval to a specific indexed content format.
+        #[arg(long)]
+        format: Option<String>,
         /// Overrides the generation model name.
         #[arg(long)]
         gen_model: Option<String>,

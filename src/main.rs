@@ -24,8 +24,8 @@ use std::path::Path;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{
-    collect_store_stats, connect_db, ensure_fts_index, ensure_metadata, extract_contexts,
-    load_metadata, replace_source_rows,
+    build_retrieval_filter, collect_store_stats, connect_db, ensure_fts_index, ensure_metadata,
+    extract_contexts, load_metadata, replace_source_rows,
 };
 
 #[tokio::main]
@@ -59,9 +59,27 @@ async fn main() -> Result<()> {
             question,
             top_k,
             show_context,
+            source,
+            path_prefix,
+            page,
+            format,
             gen_model,
             max_tokens,
-        } => cmd_query(name, question, top_k, show_context, gen_model, max_tokens).await?,
+        } => {
+            cmd_query(
+                name,
+                question,
+                top_k,
+                show_context,
+                source,
+                path_prefix,
+                page,
+                format,
+                gen_model,
+                max_tokens,
+            )
+            .await?
+        }
         Command::Config { command } => match command {
             ConfigCommand::Show => cmd_config_show(name).await?,
             ConfigCommand::Set { key, value } => cmd_config_set(name, key, value).await?,
@@ -145,6 +163,10 @@ async fn cmd_query(
     question: String,
     top_k: usize,
     show_context: bool,
+    source: Option<String>,
+    path_prefix: Option<String>,
+    page: Option<i32>,
+    format: Option<String>,
     gen_model: Option<String>,
     max_tokens: usize,
 ) -> Result<()> {
@@ -168,15 +190,23 @@ async fn cmd_query(
     let embedder = Embedder::new(cfg.ollama.base_url.clone(), embed_model_name);
     let embedding = embedder.embed(&question).await?;
 
-    let batches: Vec<arrow_array::RecordBatch> = table
+    let mut query = table
         .query()
         .full_text_search(FullTextSearchQuery::new(question.clone()))
         .nearest_to(embedding.as_slice())?
-        .limit(top_k)
-        .execute()
-        .await?
-        .try_collect::<Vec<_>>()
-        .await?;
+        .limit(top_k);
+
+    if let Some(filter) = build_retrieval_filter(
+        source.as_deref(),
+        path_prefix.as_deref(),
+        page,
+        format.as_deref(),
+    ) {
+        query = query.only_if(filter);
+    }
+
+    let batches: Vec<arrow_array::RecordBatch> =
+        query.execute().await?.try_collect::<Vec<_>>().await?;
 
     let contexts = extract_contexts(&batches)?;
     if contexts.is_empty() {
@@ -621,6 +651,10 @@ mod tests {
                 "What is this project?".to_string(),
                 5,
                 true,
+                None,
+                None,
+                None,
+                None,
                 None,
                 64,
             )

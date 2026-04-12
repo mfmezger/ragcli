@@ -274,11 +274,17 @@ async fn embed_chunks(
             obj.insert("source".to_string(), json!(path.display().to_string()));
             obj.insert("page".to_string(), json!(page_num));
         }
+        let format = metadata
+            .get("format")
+            .and_then(Value::as_str)
+            .context("chunk metadata missing format")?
+            .to_string();
         rows.push(ChunkRow {
             id: chunk_hash.clone(),
             source_path: path.display().to_string(),
             chunk_text: chunk.text,
             chunk_hash,
+            format,
             page: page_num,
             chunk_index: idx as i32,
             metadata: metadata.to_string(),

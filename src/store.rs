@@ -34,6 +34,8 @@ pub struct ChunkRow {
     pub chunk_text: String,
     /// Stable content hash for the chunk.
     pub chunk_hash: String,
+    /// Indexed content format such as `text`, `markdown`, `pdf`, or `image`.
+    pub format: String,
     /// Page number for paginated sources, or `0` when not applicable.
     pub page: i32,
     /// Zero-based chunk index within the source unit.
@@ -255,6 +257,7 @@ fn build_schema(dim: usize) -> Arc<Schema> {
         Field::new("source_path", DataType::Utf8, false),
         Field::new("chunk_text", DataType::Utf8, false),
         Field::new("chunk_hash", DataType::Utf8, false),
+        Field::new("format", DataType::Utf8, false),
         Field::new("page", DataType::Int32, false),
         Field::new("chunk_index", DataType::Int32, false),
         Field::new("metadata", DataType::Utf8, false),
@@ -274,6 +277,7 @@ fn build_record_batch(schema: Arc<Schema>, rows: &[ChunkRow]) -> Result<RecordBa
     let source_paths = StringArray::from_iter_values(rows.iter().map(|r| r.source_path.as_str()));
     let chunk_texts = StringArray::from_iter_values(rows.iter().map(|r| r.chunk_text.as_str()));
     let chunk_hashes = StringArray::from_iter_values(rows.iter().map(|r| r.chunk_hash.as_str()));
+    let formats = StringArray::from_iter_values(rows.iter().map(|r| r.format.as_str()));
     let pages = Int32Array::from_iter_values(rows.iter().map(|r| r.page));
     let chunk_indices = Int32Array::from_iter_values(rows.iter().map(|r| r.chunk_index));
     let metadata = StringArray::from_iter_values(rows.iter().map(|r| r.metadata.as_str()));
@@ -290,12 +294,48 @@ fn build_record_batch(schema: Arc<Schema>, rows: &[ChunkRow]) -> Result<RecordBa
             Arc::new(source_paths),
             Arc::new(chunk_texts),
             Arc::new(chunk_hashes),
+            Arc::new(formats),
             Arc::new(pages),
             Arc::new(chunk_indices),
             Arc::new(metadata),
             Arc::new(vectors),
         ],
     )?)
+}
+
+/// Builds a SQL filter expression for retrieval constraints.
+pub fn build_retrieval_filter(
+    source: Option<&str>,
+    path_prefix: Option<&str>,
+    page: Option<i32>,
+    format: Option<&str>,
+) -> Option<String> {
+    let mut clauses = Vec::new();
+
+    if let Some(source) = source {
+        clauses.push(format!("source_path = {}", sql_string(source)));
+    }
+
+    if let Some(path_prefix) = path_prefix {
+        clauses.push(format!(
+            "source_path LIKE {} ESCAPE '\\\\'",
+            sql_like_prefix(path_prefix)
+        ));
+    }
+
+    if let Some(page) = page {
+        clauses.push(format!("page = {page}"));
+    }
+
+    if let Some(format) = format {
+        clauses.push(format!("format = {}", sql_string(format)));
+    }
+
+    if clauses.is_empty() {
+        None
+    } else {
+        Some(clauses.join(" AND "))
+    }
 }
 
 /// Extracts retrieval contexts from query result batches.
@@ -433,6 +473,15 @@ fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+fn sql_like_prefix(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+        .replace('\'', "''");
+    format!("'{escaped}%'")
+}
+
 fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     chars.div_ceil(4)
@@ -452,6 +501,10 @@ mod tests {
             source_path: source_path.to_string(),
             chunk_text: text.to_string(),
             chunk_hash: text.to_string(),
+            format: SourceKind::from_path(Path::new(source_path))
+                .format_label()
+                .unwrap_or("text")
+                .to_string(),
             page: 0,
             chunk_index: 0,
             metadata: "{}".to_string(),
@@ -536,10 +589,150 @@ mod tests {
             .any(|ctx| ctx.contains("rarekeyword exact match")));
     }
 
+    #[tokio::test]
+    async fn test_hybrid_search_can_filter_by_source_and_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                ChunkRow {
+                    page: 1,
+                    ..sample_row("docs/guide.pdf", "rarekeyword page one", -10.0)
+                },
+                ChunkRow {
+                    page: 2,
+                    ..sample_row("docs/guide.pdf", "rarekeyword page two", 100.0)
+                },
+                ChunkRow {
+                    page: 2,
+                    ..sample_row("notes/todo.txt", "rarekeyword wrong source", 100.0)
+                },
+            ],
+            &["docs/guide.pdf".to_string(), "notes/todo.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let filter = build_retrieval_filter(Some("docs/guide.pdf"), None, Some(2), None).unwrap();
+        let table = db.open_table(DEFAULT_TABLE_NAME).execute().await.unwrap();
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .full_text_search(FullTextSearchQuery::new("rarekeyword".to_string()))
+            .nearest_to(&[-10.0, -10.0])
+            .unwrap()
+            .only_if(filter)
+            .limit(5)
+            .execute()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let contexts = extract_contexts(&batches).unwrap();
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].contains("docs/guide.pdf"));
+        assert!(contexts[0].contains("rarekeyword page two"));
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_search_can_filter_by_path_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                sample_row("docs/a.txt", "rarekeyword docs", -10.0),
+                sample_row("notes/b.txt", "rarekeyword notes", 100.0),
+            ],
+            &["docs/a.txt".to_string(), "notes/b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let filter = build_retrieval_filter(None, Some("docs/"), None, None).unwrap();
+        let table = db.open_table(DEFAULT_TABLE_NAME).execute().await.unwrap();
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .full_text_search(FullTextSearchQuery::new("rarekeyword".to_string()))
+            .nearest_to(&[-10.0, -10.0])
+            .unwrap()
+            .only_if(filter)
+            .limit(5)
+            .execute()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let contexts = extract_contexts(&batches).unwrap();
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].contains("docs/a.txt"));
+        assert!(!contexts[0].contains("notes/b.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_hybrid_search_can_filter_by_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                sample_row("docs/a.md", "rarekeyword markdown", -10.0),
+                sample_row("docs/b.txt", "rarekeyword text", 100.0),
+            ],
+            &["docs/a.md".to_string(), "docs/b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let filter = build_retrieval_filter(None, None, None, Some("markdown")).unwrap();
+        let table = db.open_table(DEFAULT_TABLE_NAME).execute().await.unwrap();
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .full_text_search(FullTextSearchQuery::new("rarekeyword".to_string()))
+            .nearest_to(&[-10.0, -10.0])
+            .unwrap()
+            .only_if(filter)
+            .limit(5)
+            .execute()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let contexts = extract_contexts(&batches).unwrap();
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].contains("docs/a.md"));
+        assert!(!contexts[0].contains("docs/b.txt"));
+    }
+
     #[test]
     fn test_strip_thinking() {
         let input = "<think>hidden</think>\nFinal answer.";
         assert_eq!(strip_thinking(input).trim(), "Final answer.");
+    }
+
+    #[test]
+    fn test_build_retrieval_filter_combines_clauses() {
+        let filter = build_retrieval_filter(
+            Some("docs/it's.txt"),
+            Some("docs/_v1%/"),
+            Some(3),
+            Some("markdown"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            filter,
+            "source_path = 'docs/it''s.txt' AND source_path LIKE 'docs/\\_v1\\%/%' ESCAPE '\\\\' AND page = 3 AND format = 'markdown'"
+        );
     }
 
     #[test]
