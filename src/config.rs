@@ -283,13 +283,19 @@ pub fn status(exists: bool) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        test_env_lock()
     }
 
     #[test]
