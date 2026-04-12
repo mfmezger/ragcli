@@ -300,7 +300,7 @@ async fn run_agentic_stub_query_command(
         mode_label(command.mode)
     )];
     let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-    let stub_plan = placeholder_plan(command.mode, &command.question, &rewrite_set);
+    let stub_plan = placeholder_plan(command.mode, &rewrite_set);
     trace.extend(stub_plan.notes.iter().cloned());
     let hits = retrieve_candidates(runtime, command, &stub_plan.query_variants, &mut trace).await?;
 

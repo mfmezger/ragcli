@@ -9,11 +9,8 @@ pub struct GraphModeStubPlan {
     pub query_variants: Vec<String>,
 }
 
-pub fn placeholder_plan(
-    mode: QueryModeArg,
-    question: &str,
-    rewrite_set: &QueryRewriteSet,
-) -> GraphModeStubPlan {
+pub fn placeholder_plan(mode: QueryModeArg, rewrite_set: &QueryRewriteSet) -> GraphModeStubPlan {
+    let question = rewrite_set.original.as_str();
     let (execution_label, notes, query_variants) = match mode {
         QueryModeArg::Local => (
             "local-placeholder",
@@ -68,14 +65,15 @@ pub fn placeholder_plan(
 }
 
 fn dedupe_queries(queries: [Option<&str>; 3]) -> Vec<String> {
-    let mut variants = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut variants = Vec::new();
     for query in queries.into_iter().flatten() {
         let trimmed = query.trim();
-        if !trimmed.is_empty() {
-            variants.insert(trimmed.to_string());
+        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+            variants.push(trimmed.to_string());
         }
     }
-    variants.into_iter().collect()
+    variants
 }
 
 #[cfg(test)]
@@ -93,11 +91,7 @@ mod tests {
 
     #[test]
     fn test_local_placeholder_uses_local_label() {
-        let plan = placeholder_plan(
-            QueryModeArg::Local,
-            "How do config checks work?",
-            &rewrite_set(),
-        );
+        let plan = placeholder_plan(QueryModeArg::Local, &rewrite_set());
         assert_eq!(plan.execution_label, "local-placeholder");
         assert!(plan
             .notes
@@ -108,39 +102,29 @@ mod tests {
 
     #[test]
     fn test_global_placeholder_keeps_keyword_variant_without_semantic_variant() {
-        let plan = placeholder_plan(
-            QueryModeArg::Global,
-            "How do config checks work?",
-            &rewrite_set(),
-        );
+        let plan = placeholder_plan(QueryModeArg::Global, &rewrite_set());
         assert_eq!(plan.execution_label, "global-placeholder");
         assert_eq!(plan.query_variants.len(), 2);
-        assert!(plan
-            .query_variants
-            .iter()
-            .any(|query| query.contains("metadata")));
-        assert!(!plan
-            .query_variants
-            .iter()
-            .any(|query| query.contains("validation flow")));
+        assert_eq!(
+            plan.query_variants,
+            vec![
+                "How do config checks work?".to_string(),
+                "config validation metadata".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn test_mix_placeholder_combines_semantic_and_keyword_variants() {
-        let plan = placeholder_plan(
-            QueryModeArg::Mix,
-            "How do config checks work?",
-            &rewrite_set(),
-        );
+    fn test_mix_placeholder_combines_semantic_and_keyword_variants_in_order() {
+        let plan = placeholder_plan(QueryModeArg::Mix, &rewrite_set());
         assert_eq!(plan.execution_label, "mix-placeholder");
-        assert_eq!(plan.query_variants.len(), 3);
-        assert!(plan
-            .query_variants
-            .iter()
-            .any(|query| query.contains("validation flow")));
-        assert!(plan
-            .query_variants
-            .iter()
-            .any(|query| query.contains("metadata")));
+        assert_eq!(
+            plan.query_variants,
+            vec![
+                "How do config checks work?".to_string(),
+                "Explain config validation flow".to_string(),
+                "config validation metadata".to_string(),
+            ]
+        );
     }
 }
