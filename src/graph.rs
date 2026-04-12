@@ -14,13 +14,7 @@ pub fn placeholder_plan(
     question: &str,
     rewrite_set: &QueryRewriteSet,
 ) -> GraphModeStubPlan {
-    let mut variants = BTreeSet::new();
-    variants.insert(question.to_string());
-    for variant in rewrite_set.query_variants() {
-        variants.insert(variant);
-    }
-
-    let (execution_label, notes) = match mode {
+    let (execution_label, notes, query_variants) = match mode {
         QueryModeArg::Local => (
             "local-placeholder",
             vec![
@@ -29,49 +23,59 @@ pub fn placeholder_plan(
                 "current implementation narrows to direct fact-style variants before hybrid retrieval"
                     .to_string(),
             ],
+            dedupe_queries([Some(question), None, None]),
         ),
-        QueryModeArg::Global => {
-            if let Some(keyword_variant) = rewrite_set.keyword_variant.as_deref() {
-                variants.insert(keyword_variant.to_string());
-            }
-            (
-                "global-placeholder",
-                vec![
-                    "global mode reserves graph-centric retrieval for a later milestone"
-                        .to_string(),
-                    "current implementation broadens the query set before hybrid retrieval"
-                        .to_string(),
-                ],
-            )
-        }
-        QueryModeArg::Mix => {
-            if let Some(semantic_variant) = rewrite_set.semantic_variant.as_deref() {
-                variants.insert(semantic_variant.to_string());
-            }
-            if let Some(keyword_variant) = rewrite_set.keyword_variant.as_deref() {
-                variants.insert(keyword_variant.to_string());
-            }
-            (
-                "mix-placeholder",
-                vec![
-                    "mix mode will later combine graph neighborhoods with chunk retrieval"
-                        .to_string(),
-                    "current implementation blends local and broad query variants before hybrid retrieval"
-                        .to_string(),
-                ],
-            )
-        }
+        QueryModeArg::Global => (
+            "global-placeholder",
+            vec![
+                "global mode reserves graph-centric retrieval for a later milestone"
+                    .to_string(),
+                "current implementation broadens the query set before hybrid retrieval"
+                    .to_string(),
+            ],
+            dedupe_queries([
+                Some(question),
+                rewrite_set.keyword_variant.as_deref(),
+                None,
+            ]),
+        ),
+        QueryModeArg::Mix => (
+            "mix-placeholder",
+            vec![
+                "mix mode will later combine graph neighborhoods with chunk retrieval"
+                    .to_string(),
+                "current implementation blends local and broad query variants before hybrid retrieval"
+                    .to_string(),
+            ],
+            dedupe_queries([
+                Some(question),
+                rewrite_set.semantic_variant.as_deref(),
+                rewrite_set.keyword_variant.as_deref(),
+            ]),
+        ),
         _ => (
             "hybrid",
             vec!["non-graph modes do not use the graph placeholder planner".to_string()],
+            dedupe_queries([Some(question), None, None]),
         ),
     };
 
     GraphModeStubPlan {
         execution_label,
         notes,
-        query_variants: variants.into_iter().collect(),
+        query_variants,
     }
+}
+
+fn dedupe_queries(queries: [Option<&str>; 3]) -> Vec<String> {
+    let mut variants = BTreeSet::new();
+    for query in queries.into_iter().flatten() {
+        let trimmed = query.trim();
+        if !trimmed.is_empty() {
+            variants.insert(trimmed.to_string());
+        }
+    }
+    variants.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -99,20 +103,26 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("chunk-centric retrieval")));
+        assert_eq!(plan.query_variants, vec!["How do config checks work?"]);
     }
 
     #[test]
-    fn test_global_placeholder_keeps_keyword_variant() {
+    fn test_global_placeholder_keeps_keyword_variant_without_semantic_variant() {
         let plan = placeholder_plan(
             QueryModeArg::Global,
             "How do config checks work?",
             &rewrite_set(),
         );
         assert_eq!(plan.execution_label, "global-placeholder");
+        assert_eq!(plan.query_variants.len(), 2);
         assert!(plan
             .query_variants
             .iter()
             .any(|query| query.contains("metadata")));
+        assert!(!plan
+            .query_variants
+            .iter()
+            .any(|query| query.contains("validation flow")));
     }
 
     #[test]
@@ -123,6 +133,7 @@ mod tests {
             &rewrite_set(),
         );
         assert_eq!(plan.execution_label, "mix-placeholder");
+        assert_eq!(plan.query_variants.len(), 3);
         assert!(plan
             .query_variants
             .iter()
