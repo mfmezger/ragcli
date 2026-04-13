@@ -1,6 +1,6 @@
+use crate::jsonutil::{parse_json, trim_json_fences};
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
-use crate::rewrite::trim_json_fences;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -184,7 +184,8 @@ pub async fn verify_answer_support(
 pub fn fallback_query_plan(question: &str) -> QueryPlan {
     let lower = question.to_ascii_lowercase();
     let strategy =
-        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") { //FIXME: not language agnostic. should be handeled by agent 
+        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") {
+            //FIXME: not language agnostic. should be handeled by agent
             RetrievalStrategy::Decompose
         } else {
             RetrievalStrategy::Direct
@@ -194,7 +195,6 @@ pub fn fallback_query_plan(question: &str) -> QueryPlan {
     } else {
         QuestionType::Lookup
     };
-
     QueryPlan {
         question_type,
         strategy,
@@ -232,8 +232,7 @@ pub fn fallback_support_check(answer: &str, evidence: &[RetrievalCandidate]) -> 
 }
 
 pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
-    let payload: QueryPlanPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse query plan JSON")?;
+    let payload: QueryPlanPayload = parse_json(raw, "parse query plan JSON")?;
     Ok(QueryPlan {
         question_type: parse_question_type(&payload.question_type)?,
         strategy: parse_retrieval_strategy(&payload.strategy)?,
@@ -248,8 +247,7 @@ pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
 }
 
 pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
-    let payload: EvidencePayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse evidence assessment JSON")?;
+    let payload: EvidencePayload = parse_json(raw, "parse evidence assessment JSON")?;
     Ok(EvidenceAssessment {
         verdict: parse_evidence_verdict(&payload.verdict)?,
         missing_aspects: payload
@@ -262,8 +260,7 @@ pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
 }
 
 pub fn parse_support_check(raw: &str) -> Result<SupportCheck> {
-    let payload: SupportPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse support check JSON")?;
+    let payload: SupportPayload = parse_json(raw, "parse support check JSON")?;
     Ok(SupportCheck {
         supported: payload.supported,
         unsupported_claims: payload
@@ -387,7 +384,6 @@ mod tests {
             "{\"question_type\":\"lookup\",\"strategy\":\"decompose\",\"reasoning\":\"ok\",\"subqueries\":[]}",
         )
         .unwrap();
-
         assert_eq!(plan.question_type, QuestionType::Lookup);
         assert_eq!(plan.strategy, RetrievalStrategy::Decompose);
     }
@@ -419,5 +415,14 @@ mod tests {
         let summarized = summarize_candidate_text(&text);
         assert_eq!(summarized.len(), SUMMARY_TEXT_MAX_CHARS + 3);
         assert!(summarized.ends_with("..."));
+    }
+
+    #[test]
+    fn test_parse_evidence_assessment_includes_raw_snippet_in_error() {
+        let err = parse_evidence_assessment("not json at all")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parse evidence assessment JSON"));
+        assert!(err.contains("not json"));
     }
 }
