@@ -7,6 +7,7 @@ mod config;
 mod fsutil;
 mod graph;
 mod ingest;
+mod jsonutil;
 mod models;
 mod retrieval;
 mod rewrite;

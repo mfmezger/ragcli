@@ -1,3 +1,4 @@
+use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -71,12 +72,11 @@ pub async fn rewrite_query_for_retrieval(
         )
         .await
         .context("generate query rewrite JSON")?;
-
     parse_query_rewrite_set(&response, question)
 }
 
 pub fn parse_query_rewrite_set(raw: &str, question: &str) -> Result<QueryRewriteSet> {
-    let payload = parse_payload(raw).context("parse query rewrite payload")?;
+    let payload = parse_query_rewrite_payload(raw)?;
     Ok(QueryRewriteSet {
         original: question.to_string(),
         semantic_variant: clean_optional(payload.semantic_variant),
@@ -90,26 +90,13 @@ pub fn parse_query_rewrite_set(raw: &str, question: &str) -> Result<QueryRewrite
     })
 }
 
-fn parse_payload(raw: &str) -> Result<QueryRewritePayload> {
-    let trimmed = trim_json_fences(raw);
-    serde_json::from_str(trimmed).context("deserialize rewrite JSON")
+fn parse_query_rewrite_payload(raw: &str) -> Result<QueryRewritePayload> {
+    parse_json(raw, "parse query rewrite payload")
 }
 
+/// Provided for backwards compatibility — prefer [`jsonutil::trim_json_fences`].
 pub fn trim_json_fences(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if !trimmed.starts_with("```") {
-        return trimmed;
-    }
-
-    let without_prefix = trimmed
-        .trim_start_matches("```")
-        .trim_start_matches("json")
-        .trim();
-
-    without_prefix
-        .strip_suffix("```")
-        .unwrap_or(without_prefix)
-        .trim()
+    crate::jsonutil::trim_json_fences(raw)
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
