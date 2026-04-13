@@ -1,31 +1,52 @@
 //! Shared source-kind classification for ingestion and store statistics.
+//!
+//! `SourceKind` classifies a file by its format (text, markdown, HTML, CSV, code, PDF, image)
+//! based on the file extension. `ContentCategory` is an aggregate grouping used for
+//! store statistics reporting.
 
 use std::path::Path;
 
-/// File kind recognized by `ragcli`.
+/// File format recognized by `ragcli` during ingestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
+    /// Plain text with no special structure.
     Text,
+    /// Markdown with optional frontmatter.
     Markdown,
+    /// HTML, including HTML generated from Jupyter notebooks.
     Html,
+    /// Delimiter-separated values (CSV or TSV).
     Csv { delimiter: u8 },
+    /// Source code with a known language tag.
     Code { language: &'static str },
+    /// Portable Document Format.
     Pdf,
+    /// Raster image (PNG, JPEG, WebP) — processed through vision captioning.
     Image,
+    /// Known but unsupported format; skipped during ingestion.
     Unsupported,
 }
 
-/// Aggregated content category used for store statistics.
+/// Aggregate content grouping used in store statistics.
+///
+/// `ContentCategory` collapses the fine-grained `SourceKind` into four buckets
+/// for high-level reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentCategory {
+    /// Text, Markdown, HTML, CSV, or code files.
     Text,
+    /// PDF files.
     Pdf,
+    /// Image files processed via vision captioning.
     Image,
+    /// Files that are recognized but unsupported.
     Other,
 }
 
 impl SourceKind {
-    /// Classifies a source path by file extension.
+    /// Classifies a file by its extension, returning the appropriate [`SourceKind`].
+    ///
+    /// Extension matching is case-insensitive. Unknown extensions yield `Unsupported`.
     pub fn from_path(path: &Path) -> Self {
         let ext = path
             .extension()
@@ -64,7 +85,9 @@ impl SourceKind {
         }
     }
 
-    /// Returns the metadata format label used for chunk metadata.
+    /// Returns the format label written into chunk metadata for this source kind.
+    ///
+    /// Returns `None` for `Unsupported` files since they are not ingested.
     pub fn format_label(self) -> Option<&'static str> {
         match self {
             Self::Text => Some("text"),
@@ -79,7 +102,7 @@ impl SourceKind {
         }
     }
 
-    /// Returns the aggregate content category used in store statistics.
+    /// Maps this source kind to its aggregate [`ContentCategory`] for statistics.
     pub fn content_category(self) -> ContentCategory {
         match self {
             Self::Text | Self::Markdown | Self::Html | Self::Csv { .. } | Self::Code { .. } => {
