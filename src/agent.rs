@@ -1,3 +1,18 @@
+//! RAG query planning, evidence assessment, and answer verification via LLM.
+//!
+//! The agent module drives the iterative retrieval loop. It classifies a user question,
+//! builds a retrieval plan, gathers evidence, and verifies that generated answers are
+//! actually supported by the retrieved chunks.
+//!
+//! # Query lifecycle
+//!
+//! 1. [`build_query_plan`] — classifies the question type and chooses a retrieval strategy
+//! 2. Retrieval against the store (handled by the caller / `app.rs`)
+//! 3. [`assess_evidence`] — LLM judges whether retrieved candidates are sufficient
+//! 4. Optionally iterate with rewritten subqueries
+//! 5. [`verify_answer_support`] — LLM checks that the final answer is grounded in evidence
+
+use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
 use crate::rewrite::trim_json_fences;
@@ -6,106 +21,131 @@ use serde::Deserialize;
 
 const SUMMARY_TEXT_MAX_CHARS: usize = 600;
 
-#[allow(dead_code)]
+/// Configuration for the agentic retrieval loop.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentQueryConfig {
+    /// Maximum candidates to return from the store per iteration.
     pub top_k: usize,
+    /// Total candidates to fetch before reranking / pruning.
     pub fetch_k: usize,
+    /// Maximum retrieval iterations before giving up.
     pub max_iterations: usize,
+    /// Whether to rewrite the query each iteration.
     pub enable_rewrite: bool,
+    /// Whether to run the LLM reranker after retrieval.
     pub enable_rerank: bool,
 }
 
+/// Class of a user question, influencing which retrieval strategy is selected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QuestionType {
+    /// A single factual lookup — "What is X?"
     Lookup,
+    /// Comparison between two or more things — "How does X differ from Y?"
     Compare,
+    /// Multi-step reasoning requiring multiple facts — "Why does X happen?"
     MultiHop,
+    /// Summarization or synthesis — "Summarize the debate around X."
     Summary,
+    /// Open-ended exploration — "What related topics exist?"
     Exploratory,
 }
 
+/// Retrieval strategy selected by the query planner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RetrievalStrategy {
+    /// Use the original question directly against the store.
     Direct,
+    /// Rewrite the question into semantic / keyword variants before retrieving.
     Rewrite,
+    /// Decompose the question into subqueries, retrieve each, then combine.
     Decompose,
+    /// Retrieve broadly then rerank with an LLM.
     BroadThenRerank,
 }
 
+/// Retrieval plan produced by the LLM query planner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryPlan {
+    /// Classified question type.
     pub question_type: QuestionType,
+    /// Selected retrieval strategy.
     pub strategy: RetrievalStrategy,
+    /// Human-readable reasoning for why this strategy was chosen.
     pub reasoning: String,
+    /// Decomposed subqueries when strategy is `Decompose`.
     pub subqueries: Vec<String>,
 }
 
+/// Result of an LLM evidence assessment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvidenceVerdict {
+    /// Retrieved candidates fully cover what is needed to answer.
     Sufficient,
+    /// Candidates are partially relevant; more iterations or reformulation may help.
     Partial,
+    /// Candidates do not contain enough relevant information.
     Insufficient,
 }
 
+/// One iteration of the agentic retrieval loop.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentIteration {
+    /// Zero-based iteration index.
     pub iteration: usize,
+    /// Query variants used in this iteration (original + rewritten).
     pub query_variants: Vec<String>,
+    /// Total candidates retrieved before pruning.
     pub retrieved_count: usize,
+    /// Candidates retained after deduplication and pruning.
     pub kept_count: usize,
+    /// LLM judgment of evidence sufficiency.
     pub sufficiency: EvidenceVerdict,
+    /// Human-readable notes from this iteration.
     pub notes: Vec<String>,
 }
 
+/// Final result of a full agentic retrieval session.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentResult {
+    /// Generated answer string.
     pub answer: String,
+    /// Retrieval candidates used as context for generation.
     pub contexts: Vec<RetrievalCandidate>,
+    /// Query plan selected by the planner.
     pub plan: QueryPlan,
+    /// All iterations run before reaching a terminal verdict.
     pub iterations: Vec<AgentIteration>,
+    /// Support check confirming answer is grounded in evidence.
     pub support_check: SupportCheck,
 }
 
+/// Result of verifying that a generated answer is supported by retrieved evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportCheck {
+    /// Whether all substantive claims in the answer have supporting evidence.
     pub supported: bool,
+    /// List of specific claims in the answer that lack evidence.
     pub unsupported_claims: Vec<String>,
+    /// Additional notes from the verifier.
     pub notes: Vec<String>,
 }
 
+/// Evidence assessment returned by the LLM.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EvidenceAssessment {
+    /// Overall verdict on evidence sufficiency.
     pub verdict: EvidenceVerdict,
+    /// Specific aspects of the question that are not covered by retrieved candidates.
     pub missing_aspects: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct QueryPlanPayload {
-    question_type: String,
-    strategy: String,
-    reasoning: Option<String>,
-    #[serde(default)]
-    subqueries: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EvidencePayload {
-    verdict: String,
-    #[serde(default)]
-    missing_aspects: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SupportPayload {
-    supported: bool,
-    #[serde(default)]
-    unsupported_claims: Vec<String>,
-    #[serde(default)]
-    notes: Vec<String>,
-}
-
+/// Builds a structured query plan from a user question using an LLM.
+///
+/// The LLM is instructed to classify the question type and select an appropriate
+/// retrieval strategy, returning strict JSON. Falls back to a heuristic plan
+/// (`fallback_query_plan`) if the LLM misformats its response.
 pub async fn build_query_plan(generator: &Generator, question: &str) -> Result<QueryPlan> {
     let response = generator
         .generate_json(
@@ -128,6 +168,12 @@ pub async fn build_query_plan(generator: &Generator, question: &str) -> Result<Q
     parse_query_plan(&response)
 }
 
+/// Asks an LLM to judge whether the retrieved candidates are sufficient to answer
+/// the given question.
+///
+/// Returns an [`EvidenceAssessment`] with a verdict and, if insufficient,
+/// a list of missing aspects. This is used to decide whether to continue iterating
+/// or to produce an answer from what was gathered.
 pub async fn assess_evidence(
     generator: &Generator,
     question: &str,
@@ -154,6 +200,12 @@ pub async fn assess_evidence(
     parse_evidence_assessment(&response)
 }
 
+/// Asks an LLM to verify that every substantive claim in an answer is grounded
+/// in the provided evidence candidates.
+///
+/// Returns a [`SupportCheck`] indicating whether the answer is fully supported,
+/// and listing any claims that lack backing. Used as a final check before returning
+/// an answer to the user.
 pub async fn verify_answer_support(
     generator: &Generator,
     question: &str,
@@ -181,10 +233,15 @@ pub async fn verify_answer_support(
     parse_support_check(&response)
 }
 
+/// Heuristic fallback plan used when the LLM fails to produce a parseable plan.
+///
+/// Uses simple keyword detection to decide between `Direct` and `Decompose`:
+/// presence of "and" / "interact" / "connect" triggers decomposition.
 pub fn fallback_query_plan(question: &str) -> QueryPlan {
     let lower = question.to_ascii_lowercase();
     let strategy =
-        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") { //FIXME: not language agnostic. should be handeled by agent 
+        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") {
+            //FIXME: not language agnostic. should be handeled by agent
             RetrievalStrategy::Decompose
         } else {
             RetrievalStrategy::Direct
@@ -194,7 +251,6 @@ pub fn fallback_query_plan(question: &str) -> QueryPlan {
     } else {
         QuestionType::Lookup
     };
-
     QueryPlan {
         question_type,
         strategy,
@@ -203,6 +259,9 @@ pub fn fallback_query_plan(question: &str) -> QueryPlan {
     }
 }
 
+/// Heuristic fallback for evidence assessment when the LLM is unavailable.
+///
+/// Returns `Sufficient` for 3+ candidates, `Partial` for 1–2, and `Insufficient` for none.
 pub fn fallback_evidence_assessment(candidates: &[RetrievalCandidate]) -> EvidenceAssessment {
     let verdict = if candidates.len() >= 3 {
         EvidenceVerdict::Sufficient
@@ -218,6 +277,10 @@ pub fn fallback_evidence_assessment(candidates: &[RetrievalCandidate]) -> Eviden
     }
 }
 
+/// Heuristic fallback support check when the LLM is unavailable.
+///
+/// Returns `supported = true` if the answer is non-empty and there is at least one
+/// evidence candidate; otherwise `supported = false`.
 pub fn fallback_support_check(answer: &str, evidence: &[RetrievalCandidate]) -> SupportCheck {
     let supported = !answer.trim().is_empty() && !evidence.is_empty();
     SupportCheck {
@@ -231,9 +294,9 @@ pub fn fallback_support_check(answer: &str, evidence: &[RetrievalCandidate]) -> 
     }
 }
 
+/// Parses a JSON query plan from the LLM. Used by [`build_query_plan`].
 pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
-    let payload: QueryPlanPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse query plan JSON")?;
+    let payload: QueryPlanPayload = parse_json(raw, "parse query plan JSON")?;
     Ok(QueryPlan {
         question_type: parse_question_type(&payload.question_type)?,
         strategy: parse_retrieval_strategy(&payload.strategy)?,
@@ -247,9 +310,9 @@ pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
     })
 }
 
+/// Parses an evidence assessment JSON from the LLM. Used by [`assess_evidence`].
 pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
-    let payload: EvidencePayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse evidence assessment JSON")?;
+    let payload: EvidencePayload = parse_json(raw, "parse evidence assessment JSON")?;
     Ok(EvidenceAssessment {
         verdict: parse_evidence_verdict(&payload.verdict)?,
         missing_aspects: payload
@@ -261,9 +324,9 @@ pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
     })
 }
 
+/// Parses a support check JSON from the LLM. Used by [`verify_answer_support`].
 pub fn parse_support_check(raw: &str) -> Result<SupportCheck> {
-    let payload: SupportPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse support check JSON")?;
+    let payload: SupportPayload = parse_json(raw, "parse support check JSON")?;
     Ok(SupportCheck {
         supported: payload.supported,
         unsupported_claims: payload
@@ -281,6 +344,10 @@ pub fn parse_support_check(raw: &str) -> Result<SupportCheck> {
     })
 }
 
+/// Builds a compact multi-line summary of retrieval candidates for inclusion in LLM prompts.
+///
+/// Each line is `source=<path> page=<N> text=<truncated>` so the LLM can reference
+/// specific chunks without receiving the full text of every candidate.
 fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
     candidates
         .iter()
@@ -296,6 +363,7 @@ fn summarize_candidates(candidates: &[RetrievalCandidate]) -> String {
         .join("\n")
 }
 
+/// Truncates chunk text to [`SUMMARY_TEXT_MAX_CHARS`] words for prompt size control.
 fn summarize_candidate_text(text: &str) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut truncated = normalized
@@ -308,6 +376,7 @@ fn summarize_candidate_text(text: &str) -> String {
     truncated
 }
 
+/// Parses a question type string (case-insensitive) into a [`QuestionType`].
 fn parse_question_type(value: &str) -> Result<QuestionType> {
     match value.trim().to_ascii_lowercase().as_str() {
         "lookup" => Ok(QuestionType::Lookup),
@@ -319,6 +388,7 @@ fn parse_question_type(value: &str) -> Result<QuestionType> {
     }
 }
 
+/// Parses a retrieval strategy string (case-insensitive) into a [`RetrievalStrategy`].
 fn parse_retrieval_strategy(value: &str) -> Result<RetrievalStrategy> {
     match value.trim().to_ascii_lowercase().as_str() {
         "direct" => Ok(RetrievalStrategy::Direct),
@@ -329,6 +399,7 @@ fn parse_retrieval_strategy(value: &str) -> Result<RetrievalStrategy> {
     }
 }
 
+/// Parses an evidence verdict string (case-insensitive) into an [`EvidenceVerdict`].
 fn parse_evidence_verdict(value: &str) -> Result<EvidenceVerdict> {
     match value.trim().to_ascii_lowercase().as_str() {
         "sufficient" => Ok(EvidenceVerdict::Sufficient),
@@ -387,7 +458,6 @@ mod tests {
             "{\"question_type\":\"lookup\",\"strategy\":\"decompose\",\"reasoning\":\"ok\",\"subqueries\":[]}",
         )
         .unwrap();
-
         assert_eq!(plan.question_type, QuestionType::Lookup);
         assert_eq!(plan.strategy, RetrievalStrategy::Decompose);
     }
@@ -419,5 +489,14 @@ mod tests {
         let summarized = summarize_candidate_text(&text);
         assert_eq!(summarized.len(), SUMMARY_TEXT_MAX_CHARS + 3);
         assert!(summarized.ends_with("..."));
+    }
+
+    #[test]
+    fn test_parse_evidence_assessment_includes_raw_snippet_in_error() {
+        let err = parse_evidence_assessment("not json at all")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parse evidence assessment JSON"));
+        assert!(err.contains("not json"));
     }
 }

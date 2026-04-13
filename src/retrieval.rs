@@ -1,21 +1,42 @@
+//! Retrieval candidate data structure and score-based candidate merge, prune, and rerank operations.
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+/// A chunk retrieved from the store, annotated with retrieval scores from each ranking stage.
+///
+/// `RetrievalCandidate` is the core data carrier flowing through the query pipeline:
+/// it starts with a raw vector and/or keyword score from LanceDB, gets fused and/or
+/// reranked, and finally carries a combined `best_score` used for ordering results.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetrievalCandidate {
+    /// Stable row identifier assigned by LanceDB on write.
     pub id: String,
+    /// Original source file or document path this chunk was indexed from.
     pub source_path: String,
+    /// Full text content of this chunk.
     pub chunk_text: String,
+    /// JSON-encoded metadata recorded at index time (format, language, page, etc.).
     pub metadata: String,
+    /// Page number for paginated sources (PDFs); `0` for non-paginated sources.
     pub page: i32,
+    /// Zero-based chunk index within the source unit.
     pub chunk_index: i32,
+    /// Semantic similarity score from vector search. `None` if vector search was not run.
     pub vector_score: Option<f32>,
+    /// BM25 keyword score from full-text search. `None` if FTS was not run.
     pub keyword_score: Option<f32>,
+    /// Reciprocal Rank Fusion (RRF) score combining vector and keyword rankings.
     pub fused_score: Option<f32>,
+    /// Score from the LLM-based reranker. `None` if reranking was not enabled.
     pub rerank_score: Option<f32>,
 }
 
 impl RetrievalCandidate {
+    /// Returns the best available score for this candidate, preferring rerank > fused > vector > keyword.
+    ///
+    /// When multiple scores are present the most informative (rerank > fused > vector > keyword)
+    /// is returned. Returns `None` only if no scores have been computed.
     pub fn best_score(&self) -> Option<f32> {
         self.rerank_score
             .or(self.fused_score)
@@ -23,6 +44,10 @@ impl RetrievalCandidate {
             .or(self.keyword_score)
     }
 
+    /// Returns a deterministic key used to deduplicate candidates across retrieval groups.
+    ///
+    /// Prefers the stable `id` field when available; falls back to a composite of
+    /// source path, page, chunk index, and text content.
     pub fn dedupe_key(&self) -> String {
         if !self.id.is_empty() {
             return self.id.clone();
@@ -35,6 +60,12 @@ impl RetrievalCandidate {
     }
 }
 
+/// Merges candidates from multiple retrieval groups (e.g. vector + keyword), deduplicating
+/// by [`dedupe_key`](RetrievalCandidate::dedupe_key) and keeping the highest score per key.
+///
+/// This is the final step of hybrid retrieval — each group contributes candidates, identical
+/// candidates (same `source_path` + `page` + `chunk_index`) are merged by taking the maximum
+/// of their respective scores, and the combined list is sorted descending by `best_score`.
 pub fn merge_candidates(
     groups: impl IntoIterator<Item = Vec<RetrievalCandidate>>,
 ) -> Vec<RetrievalCandidate> {
@@ -57,6 +88,11 @@ pub fn merge_candidates(
     out
 }
 
+/// Prunes a sorted candidate list down to at most `top_k` results, stopping early if a
+/// score cliff is detected (score drops below 60% of the previous score after the first two).
+///
+/// This prevents low-relevance candidates from appearing in the context window when a clear
+/// relevance boundary exists in the ranked list.
 pub fn prune_candidates(
     candidates: Vec<RetrievalCandidate>,
     top_k: usize,
@@ -78,6 +114,13 @@ pub fn prune_candidates(
     kept
 }
 
+/// Reorders candidates to follow a reranked priority list, placing reranked candidates first
+/// (in the order given by `reranked_ids`) and appending any unreferenced candidates sorted
+/// by their existing score.
+///
+/// `reranked_ids` is a list of `(id, score)` pairs in the order the reranker determined.
+/// Candidates not present in `reranked_ids` are appended at the end sorted by `best_score`.
+/// The result is truncated to `top_n`.
 pub fn apply_rerank_order(
     candidates: &[RetrievalCandidate],
     reranked_ids: &[(String, f32)],
@@ -126,9 +169,14 @@ fn max_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
     }
 }
 
+/// Score-ratio threshold for early stopping in [`prune_candidates`].
+/// After the first two candidates are kept, any candidate whose score is below 60%
+/// of the previous candidate's score is dropped.
+const AUTOCUT_RATIO: f32 = 0.6;
+
 fn should_autocut(previous_score: Option<f32>, current_score: Option<f32>) -> bool {
     match (previous_score, current_score) {
-        (Some(previous), Some(current)) if previous > 0.0 => current / previous < 0.6,
+        (Some(previous), Some(current)) if previous > 0.0 => current / previous < AUTOCUT_RATIO,
         _ => false,
     }
 }
@@ -207,7 +255,6 @@ mod tests {
             ],
             3,
         );
-
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].id, "a");
         assert_eq!(kept[1].id, "b");
