@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_includes_raw_snippet_in_error() {
-        #[derive(serde::Deserialize)]
+        #[derive(Debug, serde::Deserialize)]
         struct Foo {
             a: i32,
         }

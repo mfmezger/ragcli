@@ -1,4 +1,4 @@
-use crate::jsonutil::{parse_json, trim_json_fences};
+use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -96,7 +96,7 @@ fn parse_query_rewrite_payload(raw: &str) -> Result<QueryRewritePayload> {
 
 /// Provided for backwards compatibility — prefer [`jsonutil::trim_json_fences`].
 pub fn trim_json_fences(raw: &str) -> &str {
-    jsonutil::trim_json_fences(raw)
+    crate::jsonutil::trim_json_fences(raw)
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
