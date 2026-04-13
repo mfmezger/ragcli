@@ -19,6 +19,7 @@ pub fn trim_json_fences(raw: &str) -> &str {
 
     let without_prefix = trimmed
         .trim_start_matches("```")
+        .trim_start()
         .trim_start_matches("json")
         .trim();
 
@@ -31,14 +32,14 @@ pub fn trim_json_fences(raw: &str) -> &str {
 /// Parses a JSON payload from an LLM response, stripping fences if present.
 ///
 /// Includes a snippet of the raw content in error messages so failures are actionable.
-pub fn parse_json<T: DeserializeOwned>(raw: &str, context: &'static str) -> Result<T> {
+pub fn parse_json<T: DeserializeOwned>(raw: &str, context: &str) -> Result<T> {
     let cleaned = trim_json_fences(raw);
     serde_json::from_str(cleaned).with_context(|| {
         let snippet = cleaned
             .chars()
             .take(200)
             .collect::<String>()
-            .replace('\n', " ");
+            .replace(['\n', '\r'], " ");
         format!("{context} — raw content (first 200 chars): {snippet}")
     })
 }

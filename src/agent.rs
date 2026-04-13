@@ -1,4 +1,4 @@
-use crate::jsonutil::{parse_json, trim_json_fences};
+use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
 use anyhow::{Context, Result};
