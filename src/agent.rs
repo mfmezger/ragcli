@@ -184,7 +184,7 @@ pub async fn verify_answer_support(
 pub fn fallback_query_plan(question: &str) -> QueryPlan {
     let lower = question.to_ascii_lowercase();
     let strategy =
-        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") {
+        if lower.contains(" and ") || lower.contains("interact") || lower.contains("connect") { //FIXME: not language agnostic. should be handeled by agent 
             RetrievalStrategy::Decompose
         } else {
             RetrievalStrategy::Direct

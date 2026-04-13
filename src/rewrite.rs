@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn test_parse_query_rewrite_set_errors_on_invalid_json() {
-        let err = parse_query_rewrite_set("not json", "question")
+        let err: String = parse_query_rewrite_set("not json", "question")
             .unwrap_err()
             .to_string();
         assert!(err.contains("parse query rewrite payload"));
