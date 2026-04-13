@@ -169,14 +169,9 @@ fn max_option(left: Option<f32>, right: Option<f32>) -> Option<f32> {
     }
 }
 
-/// Score-ratio threshold for early stopping in [`prune_candidates`].
-/// After the first two candidates are kept, any candidate whose score is below 60%
-/// of the previous candidate's score is dropped.
-const AUTOCUT_RATIO: f32 = 0.6;
-
 fn should_autocut(previous_score: Option<f32>, current_score: Option<f32>) -> bool {
     match (previous_score, current_score) {
-        (Some(previous), Some(current)) if previous > 0.0 => current / previous < AUTOCUT_RATIO,
+        (Some(previous), Some(current)) if previous > 0.0 => current / previous < 0.6,
         _ => false,
     }
 }
