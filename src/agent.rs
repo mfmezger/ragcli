@@ -12,9 +12,9 @@
 //! 4. Optionally iterate with rewritten subqueries
 //! 5. [`verify_answer_support`] — LLM checks that the final answer is grounded in evidence
 
+use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
-use crate::rewrite::trim_json_fences;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -321,8 +321,7 @@ pub fn fallback_support_check(answer: &str, evidence: &[RetrievalCandidate]) -> 
 
 /// Parses a JSON query plan from the LLM. Used by [`build_query_plan`].
 pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
-    let payload: QueryPlanPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse query plan JSON")?;
+    let payload: QueryPlanPayload = parse_json(raw, "parse query plan JSON")?;
     Ok(QueryPlan {
         question_type: parse_question_type(&payload.question_type)?,
         strategy: parse_retrieval_strategy(&payload.strategy)?,
@@ -338,8 +337,7 @@ pub fn parse_query_plan(raw: &str) -> Result<QueryPlan> {
 
 /// Parses an evidence assessment JSON from the LLM. Used by [`assess_evidence`].
 pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
-    let payload: EvidencePayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse evidence assessment JSON")?;
+    let payload: EvidencePayload = parse_json(raw, "parse evidence assessment JSON")?;
     Ok(EvidenceAssessment {
         verdict: parse_evidence_verdict(&payload.verdict)?,
         missing_aspects: payload
@@ -353,8 +351,7 @@ pub fn parse_evidence_assessment(raw: &str) -> Result<EvidenceAssessment> {
 
 /// Parses a support check JSON from the LLM. Used by [`verify_answer_support`].
 pub fn parse_support_check(raw: &str) -> Result<SupportCheck> {
-    let payload: SupportPayload =
-        serde_json::from_str(trim_json_fences(raw)).context("parse support check JSON")?;
+    let payload: SupportPayload = parse_json(raw, "parse support check JSON")?;
     Ok(SupportCheck {
         supported: payload.supported,
         unsupported_claims: payload
@@ -519,4 +516,12 @@ mod tests {
         assert!(summarized.ends_with("..."));
     }
 
+    #[test]
+    fn test_parse_evidence_assessment_includes_raw_snippet_in_error() {
+        let err = parse_evidence_assessment("not json at all")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parse evidence assessment JSON"));
+        assert!(err.contains("not json"));
+    }
 }
