@@ -1,5 +1,20 @@
+//! Citation rendering helpers that produce labeled, human-readable context lines
+//! from retrieval candidates for use in generation prompts.
+
 use crate::retrieval::RetrievalCandidate;
 
+/// Formats a list of candidates as labeled context blocks ready for inclusion in a prompt.
+///
+/// Each candidate is assigned a numeric label (1-based), and the chunk text is prefixed
+/// with a location line (`source=<path>` or `source=<path>, page=<N>` when pagination
+/// is available). Example output:
+///
+/// ```text
+/// [1] source=docs/config.rs, page=3
+/// Chunk text here...
+/// ```
+///
+/// Returns a vector of one formatted string per candidate, in the same order as input.
 pub fn labeled_contexts(candidates: &[RetrievalCandidate]) -> Vec<String> {
     candidates
         .iter()
@@ -15,12 +30,19 @@ pub fn labeled_contexts(candidates: &[RetrievalCandidate]) -> Vec<String> {
         .collect()
 }
 
+/// Formats a list of candidates as compact inline citations for reference display.
+///
+/// Each candidate produces a single line of the form `[N] <source>` or
+/// `[N] <source> (page: N)` when pagination is present. Unlike [`labeled_contexts`],
+/// this does not include the chunk text — it is purely a citation index.
 pub fn render_citations(candidates: &[RetrievalCandidate]) -> Vec<String> {
     candidates
         .iter()
         .enumerate()
         .map(|(idx, candidate)| match candidate.page {
-            page if page > 0 => format!("[{}] {} (page: {})", idx + 1, candidate.source_path, page),
+            page if page > 0 => {
+                format!("[{}] {} (page: {})", idx + 1, candidate.source_path, page)
+            }
             _ => format!("[{}] {}", idx + 1, candidate.source_path),
         })
         .collect()
