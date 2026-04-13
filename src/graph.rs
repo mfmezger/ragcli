@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(
             plan.query_variants,
             vec![
-                "How do config changes work?".to_string(),
+                "How do config checks work?".to_string(),
                 "Explain config validation flow".to_string(),
                 "config validation metadata".to_string(),
             ]

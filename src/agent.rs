@@ -144,8 +144,8 @@ pub struct EvidenceAssessment {
 /// Builds a structured query plan from a user question using an LLM.
 ///
 /// The LLM is instructed to classify the question type and select an appropriate
-/// retrieval strategy, returning strict JSON. Falls back to a heuristic plan
-/// (`fallback_query_plan`) if the LLM misformats its response.
+/// retrieval strategy, returning strict JSON. Returns an error if the LLM misformats
+/// its response.
 pub async fn build_query_plan(generator: &Generator, question: &str) -> Result<QueryPlan> {
     let response = generator
         .generate_json(
