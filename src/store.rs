@@ -62,7 +62,7 @@ pub struct StoreMetadata {
 }
 
 /// Counts of source files by content kind.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ContentKindCounts {
     /// Number of text or Markdown files.
     pub text_files: usize,
@@ -75,7 +75,7 @@ pub struct ContentKindCounts {
 }
 
 /// Per-source chunk statistics.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct SourceChunkStat {
     /// Source file path.
     pub source_path: String,
@@ -88,7 +88,7 @@ pub struct SourceChunkStat {
 }
 
 /// Aggregate statistics for a store.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct StoreStats {
     /// Total number of stored chunks.
     pub total_chunks: usize,

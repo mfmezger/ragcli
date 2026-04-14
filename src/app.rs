@@ -73,11 +73,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await?
         }
         Command::Config { command } => match command {
-            ConfigCommand::Show => commands::config::show(name).await?,
+            ConfigCommand::Show { json } => commands::config::show(name, json).await?,
             ConfigCommand::Set { key, value } => commands::config::set(name, key, value).await?,
         },
-        Command::Stat => commands::stat::run(name).await?,
-        Command::Doctor => commands::doctor::run(name).await?,
+        Command::Stat { json } => commands::stat::run(name, json).await?,
+        Command::Doctor { json } => commands::doctor::run(name, json).await?,
     }
 
     Ok(())

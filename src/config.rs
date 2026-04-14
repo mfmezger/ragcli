@@ -95,7 +95,7 @@ impl Default for Config {
 }
 
 /// Indicates where a resolved config value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ConfigValueSource {
     /// The value came from the store config file.
     File,
@@ -104,7 +104,7 @@ pub enum ConfigValueSource {
 }
 
 /// Tracks the source of config values after environment overrides are applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigSources {
     /// Source of `ollama.base_url`.
     pub ollama_base_url: ConfigValueSource,

@@ -1,23 +1,53 @@
 use crate::config::{
     self, ensure_store_layout, load_or_create_config_with_sources, load_or_create_file_config,
-    save_config, store_dir,
+    save_config, store_dir, Config, ConfigSources,
 };
 use anyhow::Result;
+use serde::Serialize;
 
-pub async fn show(name: Option<&str>) -> Result<()> {
+#[derive(Debug, Serialize)]
+pub struct ConfigShowReport {
+    pub store: String,
+    pub config_path: String,
+    pub config: Config,
+    pub sources: ConfigSources,
+    pub active_overrides: Vec<String>,
+}
+
+pub async fn show(name: Option<&str>, json: bool) -> Result<()> {
+    let report = build_show_report(name)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_show_human(&report)?;
+    }
+    Ok(())
+}
+
+fn build_show_report(name: Option<&str>) -> Result<ConfigShowReport> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let (cfg, sources) = load_or_create_config_with_sources(&store)?;
+    let active_overrides = sources.overrides();
 
-    println!("Store: {}", store.display());
-    println!("Config: {}", config::config_path(&store).display());
+    Ok(ConfigShowReport {
+        store: store.display().to_string(),
+        config_path: config::config_path(&store).display().to_string(),
+        config: cfg,
+        sources,
+        active_overrides,
+    })
+}
+
+fn print_show_human(report: &ConfigShowReport) -> Result<()> {
+    println!("Store: {}", report.store);
+    println!("Config: {}", report.config_path);
     println!();
-    println!("{}", toml::to_string_pretty(&cfg)?);
+    println!("{}", toml::to_string_pretty(&report.config)?);
 
-    let overrides = sources.overrides();
-    if !overrides.is_empty() {
+    if !report.active_overrides.is_empty() {
         println!("Active environment overrides:");
-        for override_entry in overrides {
+        for override_entry in &report.active_overrides {
             println!("  {}", override_entry);
         }
     }
@@ -54,11 +84,23 @@ mod tests {
             )
             .await
             .unwrap();
-            show(Some("test-store")).await.unwrap();
+            show(Some("test-store"), false).await.unwrap();
 
             let store = store_dir(Some("test-store")).unwrap();
             let cfg = load_or_create_file_config(&store).unwrap();
             assert_eq!(cfg.models.chat, "chat-z");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_show_report_serializes_to_json() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let report = build_show_report(Some("json-store")).unwrap();
+            let json = serde_json::to_string(&report).unwrap();
+            assert!(json.contains("\"config\""));
+            assert!(json.contains("\"active_overrides\""));
         })
         .await;
     }
