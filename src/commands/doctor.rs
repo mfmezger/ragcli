@@ -45,6 +45,7 @@ pub struct DoctorReport {
     pub installed_models: Option<ModelInstallReport>,
     pub metadata: PathStatusReport,
     pub metadata_summary: Option<String>,
+    pub metadata_error: Option<String>,
     pub subdirectories: Vec<NamedPathStatusReport>,
 }
 
@@ -83,10 +84,13 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
     };
 
     let metadata_path = store::metadata_path(&store);
-    let metadata_summary = if metadata_path.exists() {
-        Some(fs::read_to_string(&metadata_path)?.replace('\n', " "))
+    let (metadata_summary, metadata_error) = if metadata_path.exists() {
+        match fs::read_to_string(&metadata_path) {
+            Ok(contents) => (Some(contents.replace('\n', " ")), None),
+            Err(err) => (None, Some(err.to_string())),
+        }
     } else {
-        None
+        (None, None)
     };
 
     let subdirectories = STORE_SUBDIRECTORIES
@@ -127,6 +131,7 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
             status: status(metadata_path.exists()),
         },
         metadata_summary,
+        metadata_error,
         subdirectories,
     })
 }
@@ -171,6 +176,9 @@ fn print_human(report: &DoctorReport) {
     );
     if let Some(metadata_summary) = &report.metadata_summary {
         println!("  metadata summary: {}", metadata_summary);
+    }
+    if let Some(metadata_error) = &report.metadata_error {
+        println!("  metadata error: {}", metadata_error);
     }
 
     for subdirectory in &report.subdirectories {
@@ -226,6 +234,22 @@ mod tests {
             assert!(report.ollama_reachable);
             assert!(report.installed_models.is_some());
             assert_eq!(report.subdirectories[0].name, "lancedb");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_report_keeps_running_when_metadata_read_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let store = store_dir(Some("broken-metadata")).unwrap();
+            ensure_store_layout(&store).unwrap();
+            fs::create_dir_all(store::metadata_path(&store)).unwrap();
+
+            let report = build_report(Some("broken-metadata")).await.unwrap();
+
+            assert!(report.metadata_summary.is_none());
+            assert!(report.metadata_error.is_some());
         })
         .await;
     }

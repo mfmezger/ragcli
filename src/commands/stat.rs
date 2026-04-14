@@ -25,6 +25,7 @@ pub struct StatReport {
     pub stats: StoreStats,
     pub metadata: Option<StoreMetadata>,
     pub disk_usage: DiskUsageReport,
+    pub warnings: Vec<String>,
 }
 
 pub async fn run(name: Option<&str>, json: bool) -> Result<()> {
@@ -60,7 +61,7 @@ async fn build_report(name: Option<&str>) -> Result<StatReport> {
     }
 
     let stats = collect_store_stats(&batches, 5)?;
-    let disk_usage = collect_disk_usage(&store)?;
+    let (disk_usage, warnings) = collect_disk_usage(&store);
 
     Ok(StatReport {
         store: store.display().to_string(),
@@ -68,6 +69,7 @@ async fn build_report(name: Option<&str>) -> Result<StatReport> {
         stats,
         metadata,
         disk_usage,
+        warnings,
     })
 }
 
@@ -124,6 +126,9 @@ fn print_human(report: &StatReport) {
     println!("    meta: {}", fmt_bytes(report.disk_usage.meta_bytes));
     println!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
     println!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
+    for warning in &report.warnings {
+        println!("  warning: {}", warning);
+    }
 
     if !report.stats.top_sources.is_empty() {
         println!("  top sources by chunk count:");
@@ -157,7 +162,7 @@ pub fn dir_size_bytes(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-fn collect_disk_usage(store: &Path) -> Result<DiskUsageReport> {
+fn collect_disk_usage(store: &Path) -> (DiskUsageReport, Vec<String>) {
     let mut report = DiskUsageReport {
         total_bytes: 0,
         lancedb_bytes: 0,
@@ -165,18 +170,35 @@ fn collect_disk_usage(store: &Path) -> Result<DiskUsageReport> {
         cache_bytes: 0,
         models_bytes: 0,
     };
+    let mut warnings = Vec::new();
 
     if !store.exists() {
-        return Ok(report);
+        return (report, warnings);
     }
 
     for entry in WalkDir::new(store) {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warnings.push(format!("skipped unreadable path: {err}"));
+                continue;
+            }
+        };
         if !entry.file_type().is_file() {
             continue;
         }
 
-        let bytes = entry.metadata()?.len();
+        let bytes = match entry.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(err) => {
+                warnings.push(format!(
+                    "skipped unreadable file {}: {}",
+                    entry.path().display(),
+                    err
+                ));
+                continue;
+            }
+        };
         report.total_bytes += bytes;
 
         let Ok(relative_path) = entry.path().strip_prefix(store) else {
@@ -198,7 +220,7 @@ fn collect_disk_usage(store: &Path) -> Result<DiskUsageReport> {
         }
     }
 
-    Ok(report)
+    (report, warnings)
 }
 
 pub fn fmt_bytes(bytes: u64) -> String {
@@ -275,8 +297,9 @@ mod tests {
         std::fs::create_dir_all(store.join("other")).unwrap();
         std::fs::write(store.join("other").join("extra.bin"), b"1234567").unwrap();
 
-        let report = collect_disk_usage(&store).unwrap();
+        let (report, warnings) = collect_disk_usage(&store);
 
+        assert!(warnings.is_empty());
         assert_eq!(report.total_bytes, 27);
         assert_eq!(report.lancedb_bytes, 5);
         assert_eq!(report.meta_bytes, 2);
