@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 #[derive(Debug, Serialize)]
 pub struct PathStatusReport {
@@ -131,7 +133,7 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
 
 fn print_human(report: &DoctorReport) {
     println!("Doctor report");
-    println!("  time: {}", report.time);
+    println!("  time: {}", format_unix_timestamp(report.time));
     println!("  base: {} ({})", report.base.path, report.base.status);
     println!("  store: {} ({})", report.store.path, report.store.status);
     println!(
@@ -179,10 +181,25 @@ fn print_human(report: &DoctorReport) {
     }
 }
 
+fn format_unix_timestamp(timestamp: u64) -> String {
+    match OffsetDateTime::from_unix_timestamp(timestamp as i64)
+        .ok()
+        .and_then(|time| time.format(&Rfc3339).ok())
+    {
+        Some(formatted) => formatted,
+        None => timestamp.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{sequential_json_server, with_test_env};
+
+    #[test]
+    fn test_format_unix_timestamp_uses_rfc3339_when_possible() {
+        assert_eq!(format_unix_timestamp(0), "1970-01-01T00:00:00Z");
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_build_report_succeeds_on_empty_store() {

@@ -131,7 +131,7 @@ fn print_human(report: &StatReport) {
             println!(
                 "    - {}  [{} chunks, ~{} tokens]",
                 source.source_path,
-                source.chunks,
+                fmt_count(source.chunks),
                 fmt_count(source.estimated_tokens)
             );
         }
