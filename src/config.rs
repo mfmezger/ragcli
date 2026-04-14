@@ -96,6 +96,7 @@ impl Default for Config {
 
 /// Indicates where a resolved config value came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "env_var")]
 pub enum ConfigValueSource {
     /// The value came from the store config file.
     File,
@@ -447,6 +448,18 @@ overlap = 200
                 format!("ollama.base_url <- {}", ENV_OLLAMA_URL),
                 format!("models.chat <- {}", ENV_CHAT_MODEL),
             ]
+        );
+    }
+
+    #[test]
+    fn test_config_value_source_serializes_with_consistent_shape() {
+        let file = serde_json::to_value(ConfigValueSource::File).unwrap();
+        let env = serde_json::to_value(ConfigValueSource::Env(ENV_CHAT_MODEL)).unwrap();
+
+        assert_eq!(file, serde_json::json!({"kind": "File"}));
+        assert_eq!(
+            env,
+            serde_json::json!({"kind": "Env", "env_var": ENV_CHAT_MODEL})
         );
     }
 

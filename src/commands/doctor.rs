@@ -13,6 +13,13 @@ pub struct PathStatusReport {
 }
 
 #[derive(Debug, Serialize)]
+pub struct NamedPathStatusReport {
+    pub name: String,
+    pub path: String,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ModelInstallReport {
     pub embed_model_installed: bool,
     pub chat_model_installed: bool,
@@ -34,7 +41,7 @@ pub struct DoctorReport {
     pub installed_models: Option<ModelInstallReport>,
     pub metadata: PathStatusReport,
     pub metadata_summary: Option<String>,
-    pub subdirectories: Vec<(String, PathStatusReport)>,
+    pub subdirectories: Vec<NamedPathStatusReport>,
 }
 
 pub async fn run(name: Option<&str>, json: bool) -> Result<()> {
@@ -82,13 +89,11 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
         .into_iter()
         .map(|sub| {
             let path = store.join(sub);
-            (
-                sub.to_string(),
-                PathStatusReport {
-                    path: path.display().to_string(),
-                    status: status(path.exists()),
-                },
-            )
+            NamedPathStatusReport {
+                name: sub.to_string(),
+                path: path.display().to_string(),
+                status: status(path.exists()),
+            }
         })
         .collect();
 
@@ -164,8 +169,11 @@ fn print_human(report: &DoctorReport) {
         println!("  metadata summary: {}", metadata_summary);
     }
 
-    for (name, path_status) in &report.subdirectories {
-        println!("  {}: {} ({})", name, path_status.path, path_status.status);
+    for subdirectory in &report.subdirectories {
+        println!(
+            "  {}: {} ({})",
+            subdirectory.name, subdirectory.path, subdirectory.status
+        );
     }
 }
 
@@ -198,6 +206,7 @@ mod tests {
             let report = build_report(Some("reachable")).await.unwrap();
             assert!(report.ollama_reachable);
             assert!(report.installed_models.is_some());
+            assert_eq!(report.subdirectories[0].name, "lancedb");
         })
         .await;
     }
