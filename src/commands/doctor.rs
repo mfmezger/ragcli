@@ -1,4 +1,6 @@
-use crate::config::{self, ensure_store_layout, load_or_create_config, status, store_dir};
+use crate::config::{
+    self, ensure_store_layout, load_or_create_config, status, store_dir, STORE_SUBDIRECTORIES,
+};
 use crate::models::OllamaClient;
 use crate::store;
 use anyhow::{Context, Result};
@@ -85,7 +87,7 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
         None
     };
 
-    let subdirectories = ["lancedb", "meta", "cache", "models"]
+    let subdirectories = STORE_SUBDIRECTORIES
         .into_iter()
         .map(|sub| {
             let path = store.join(sub);

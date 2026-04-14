@@ -1,4 +1,4 @@
-use crate::config::{ensure_store_layout, load_or_create_config, store_dir};
+use crate::config::{ensure_store_layout, load_or_create_config, store_dir, STORE_SUBDIRECTORIES};
 use crate::store::{
     collect_store_stats, connect_db, load_metadata, StoreMetadata, StoreStats, DEFAULT_TABLE_NAME,
 };
@@ -7,6 +7,7 @@ use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use serde::Serialize;
 use std::path::Path;
+use walkdir::WalkDir;
 
 #[derive(Debug, Serialize)]
 pub struct DiskUsageReport {
@@ -59,13 +60,7 @@ async fn build_report(name: Option<&str>) -> Result<StatReport> {
     }
 
     let stats = collect_store_stats(&batches, 5)?;
-    let disk_usage = DiskUsageReport {
-        total_bytes: dir_size_bytes(&store)?,
-        lancedb_bytes: dir_size_bytes(&store.join("lancedb"))?,
-        meta_bytes: dir_size_bytes(&store.join("meta"))?,
-        cache_bytes: dir_size_bytes(&store.join("cache"))?,
-        models_bytes: dir_size_bytes(&store.join("models"))?,
-    };
+    let disk_usage = collect_disk_usage(&store)?;
 
     Ok(StatReport {
         store: store.display().to_string(),
@@ -162,6 +157,50 @@ pub fn dir_size_bytes(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
+fn collect_disk_usage(store: &Path) -> Result<DiskUsageReport> {
+    let mut report = DiskUsageReport {
+        total_bytes: 0,
+        lancedb_bytes: 0,
+        meta_bytes: 0,
+        cache_bytes: 0,
+        models_bytes: 0,
+    };
+
+    if !store.exists() {
+        return Ok(report);
+    }
+
+    for entry in WalkDir::new(store) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let bytes = entry.metadata()?.len();
+        report.total_bytes += bytes;
+
+        let Ok(relative_path) = entry.path().strip_prefix(store) else {
+            continue;
+        };
+        let Some(first_component) = relative_path.components().next() else {
+            continue;
+        };
+        let Some(name) = first_component.as_os_str().to_str() else {
+            continue;
+        };
+
+        match name {
+            "lancedb" => report.lancedb_bytes += bytes,
+            "meta" => report.meta_bytes += bytes,
+            "cache" => report.cache_bytes += bytes,
+            "models" => report.models_bytes += bytes,
+            _ => {}
+        }
+    }
+
+    Ok(report)
+}
+
 pub fn fmt_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -218,6 +257,31 @@ mod tests {
         assert_eq!(dir_size_bytes(&dir.path().join("missing")).unwrap(), 0);
         assert_eq!(dir_size_bytes(&file).unwrap(), 3);
         assert_eq!(dir_size_bytes(dir.path()).unwrap(), 8);
+    }
+
+    #[test]
+    fn test_collect_disk_usage_walks_store_once_and_keeps_root_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        for subdirectory in STORE_SUBDIRECTORIES {
+            std::fs::create_dir_all(store.join(subdirectory)).unwrap();
+        }
+        std::fs::write(store.join("config.toml"), b"abc").unwrap();
+        std::fs::write(store.join("lancedb").join("data.bin"), b"12345").unwrap();
+        std::fs::write(store.join("meta").join("store.toml"), b"12").unwrap();
+        std::fs::write(store.join("cache").join("blob.bin"), b"1234").unwrap();
+        std::fs::write(store.join("models").join("weights.gguf"), b"123456").unwrap();
+        std::fs::create_dir_all(store.join("other")).unwrap();
+        std::fs::write(store.join("other").join("extra.bin"), b"1234567").unwrap();
+
+        let report = collect_disk_usage(&store).unwrap();
+
+        assert_eq!(report.total_bytes, 27);
+        assert_eq!(report.lancedb_bytes, 5);
+        assert_eq!(report.meta_bytes, 2);
+        assert_eq!(report.cache_bytes, 4);
+        assert_eq!(report.models_bytes, 6);
     }
 
     #[tokio::test(flavor = "current_thread")]

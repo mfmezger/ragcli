@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_STORE_NAME: &str = "default";
+pub const STORE_SUBDIRECTORIES: [&str; 4] = ["lancedb", "meta", "cache", "models"];
 pub const ENV_OLLAMA_URL: &str = "RAGCLI_OLLAMA_URL";
 pub const ENV_EMBED_MODEL: &str = "RAGCLI_EMBED_MODEL";
 pub const ENV_CHAT_MODEL: &str = "RAGCLI_CHAT_MODEL";
@@ -167,10 +168,9 @@ pub fn config_path(store: &Path) -> PathBuf {
 
 /// Ensures the on-disk directory layout for a store exists.
 pub fn ensure_store_layout(store: &Path) -> Result<()> {
-    fs::create_dir_all(store.join("lancedb"))?;
-    fs::create_dir_all(store.join("meta"))?;
-    fs::create_dir_all(store.join("cache"))?;
-    fs::create_dir_all(store.join("models"))?;
+    for subdirectory in STORE_SUBDIRECTORIES {
+        fs::create_dir_all(store.join(subdirectory))?;
+    }
     Ok(())
 }
 
