@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use walkdir::{DirEntry, WalkDir};
@@ -396,16 +397,22 @@ fn is_hidden_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 fn fingerprint_path(path: &Path) -> Result<String> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("read file metadata: {}", path.display()))?;
-    let modified = metadata
-        .modified()
-        .with_context(|| format!("read file modified time: {}", path.display()))?;
-    let modified = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    Ok(format!("{}-{modified}", metadata.len()))
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("open file for fingerprinting: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read file for fingerprinting: {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(to_hex(&hasher.finalize()))
 }
 
 fn load_text_file(path: &Path) -> Result<String> {
@@ -1228,14 +1235,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint_path_changes_when_file_changes() {
+    fn test_fingerprint_path_changes_when_file_content_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note.txt");
         fs::write(&path, "hello").unwrap();
         let first = fingerprint_path(&path).unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        fs::write(&path, "hello world").unwrap();
+        fs::write(&path, "jello").unwrap();
         let second = fingerprint_path(&path).unwrap();
 
         assert_ne!(first, second);

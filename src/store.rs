@@ -12,7 +12,7 @@ use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::Index;
 use lancedb::index::IndexType;
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
-use lancedb::{connect, Connection, Table};
+use lancedb::{connect, Connection, Error as LanceDbError, Table};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -191,7 +191,8 @@ pub fn ensure_metadata(
 pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String, String>> {
     let table = match db.open_table(DEFAULT_TABLE_NAME).execute().await {
         Ok(table) => table,
-        Err(_) => return Ok(BTreeMap::new()),
+        Err(LanceDbError::TableNotFound { .. }) => return Ok(BTreeMap::new()),
+        Err(err) => return Err(err.into()),
     };
     let batches: Vec<RecordBatch> = table
         .query()
