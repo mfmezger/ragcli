@@ -59,6 +59,9 @@ pub enum Command {
         /// Includes hidden files and directories during traversal.
         #[arg(long, default_value_t = false)]
         include_hidden: bool,
+        /// Re-embeds files even when their stored fingerprint is unchanged.
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
     /// Queries the local store and generates an answer.
     Query {
@@ -224,6 +227,18 @@ mod tests {
                 assert_eq!(max_iterations, 2);
             }
             command => panic!("expected query command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn test_index_force_flag_parses() {
+        let cli = Cli::try_parse_from(["ragcli", "index", "./docs", "--force"]).unwrap();
+        match cli.command {
+            Command::Index { path, force, .. } => {
+                assert_eq!(path, PathBuf::from("./docs"));
+                assert!(force);
+            }
+            command => panic!("expected index command, got {command:?}"),
         }
     }
 

@@ -904,6 +904,7 @@ mod tests {
                 None,
                 Vec::new(),
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -966,6 +967,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                false,
                 false,
             )
             .await
@@ -1030,6 +1032,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                false,
                 false,
             )
             .await
@@ -1212,6 +1215,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                false,
                 false,
             )
             .await

@@ -9,7 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,6 +73,8 @@ pub async fn ingest_path(
     pdf_parser: PdfParser,
     exclude_patterns: &[String],
     include_hidden: bool,
+    existing_fingerprints: &BTreeMap<String, String>,
+    force: bool,
 ) -> Result<IngestResult> {
     let options = build_ingest_options(exclude_patterns, include_hidden)?;
     let files = collect_files(path, &options)?;
@@ -95,14 +97,45 @@ pub async fn ingest_path(
             continue;
         }
 
-        source_paths.insert(file.display().to_string());
+        let source_path = file.display().to_string();
+        let source_fingerprint = match fingerprint_path(&file) {
+            Ok(fingerprint) => fingerprint,
+            Err(err) => {
+                stats.skipped_files += 1;
+                stats.errors.push(format!("{}: {}", file.display(), err));
+                progress.inc(1);
+                continue;
+            }
+        };
+
+        if !force
+            && existing_fingerprints
+                .get(&source_path)
+                .is_some_and(|fingerprint| fingerprint == &source_fingerprint)
+        {
+            stats.skipped_files += 1;
+            progress.set_message(format!("Skipping unchanged {}", display_name(&file)));
+            progress.inc(1);
+            continue;
+        }
+
+        source_paths.insert(source_path);
 
         match extract_units(
             &file, kind, chunk_size, overlap, vision, pdf_parser, &progress,
         )
         .await
         {
-            Ok(units) => match embed_units(&file, units, embedder, &mut dim, &progress).await {
+            Ok(units) => match embed_units(
+                &file,
+                &source_fingerprint,
+                units,
+                embedder,
+                &mut dim,
+                &progress,
+            )
+            .await
+            {
                 Ok(mut file_rows) => {
                     stats.indexed_files += 1;
                     stats.total_chunks += file_rows.len();
@@ -233,6 +266,7 @@ async fn extract_units(
 
 async fn embed_units(
     path: &Path,
+    source_fingerprint: &str,
     units: Vec<ExtractedUnit>,
     embedder: &Embedder,
     dim: &mut Option<usize>,
@@ -249,7 +283,15 @@ async fn embed_units(
         } else {
             progress.set_message(format!("Embedding {}", display_name(path)));
         }
-        let mut unit_rows = embed_chunks(path, unit.page_num, unit.chunks, embedder, dim).await?;
+        let mut unit_rows = embed_chunks(
+            path,
+            source_fingerprint,
+            unit.page_num,
+            unit.chunks,
+            embedder,
+            dim,
+        )
+        .await?;
         rows.append(&mut unit_rows);
     }
     Ok(rows)
@@ -257,6 +299,7 @@ async fn embed_units(
 
 async fn embed_chunks(
     path: &Path,
+    source_fingerprint: &str,
     page_num: i32,
     chunks: Vec<ChunkContent>,
     embedder: &Embedder,
@@ -273,6 +316,7 @@ async fn embed_chunks(
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("source".to_string(), json!(path.display().to_string()));
             obj.insert("page".to_string(), json!(page_num));
+            obj.insert("source_fingerprint".to_string(), json!(source_fingerprint));
         }
         let format = metadata
             .get("format")
@@ -351,6 +395,19 @@ fn is_hidden_path(path: &Path) -> bool {
         .map(|name| name.to_string_lossy().starts_with('.'))
         .unwrap_or(false)
 }
+fn fingerprint_path(path: &Path) -> Result<String> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("read file metadata: {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("read file modified time: {}", path.display()))?;
+    let modified = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(format!("{}-{modified}", metadata.len()))
+}
+
 fn load_text_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -1170,6 +1227,20 @@ mod tests {
         assert_eq!(to_hex(&[0x0f, 0xa0]), "0fa0");
     }
 
+    #[test]
+    fn test_fingerprint_path_changes_when_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        fs::write(&path, "hello").unwrap();
+        let first = fingerprint_path(&path).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(&path, "hello world").unwrap();
+        let second = fingerprint_path(&path).unwrap();
+
+        assert_ne!(first, second);
+    }
+
     #[tokio::test]
     async fn test_ingest_path_skips_image_without_vision_model() {
         let dir = tempfile::tempdir().unwrap();
@@ -1185,6 +1256,8 @@ mod tests {
             None,
             PdfParser::Native,
             &[],
+            false,
+            &BTreeMap::new(),
             false,
         )
         .await
@@ -1204,9 +1277,20 @@ mod tests {
         fs::write(&pdf, b"not a real pdf").unwrap();
 
         let embedder = Embedder::new("http://unused".to_string(), "embed".to_string());
-        let result = ingest_path(&pdf, 100, 0, &embedder, None, PdfParser::Native, &[], false)
-            .await
-            .unwrap();
+        let result = ingest_path(
+            &pdf,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+            &BTreeMap::new(),
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.indexed_files, 0);
@@ -1235,6 +1319,8 @@ mod tests {
             PdfParser::Native,
             &[],
             false,
+            &BTreeMap::new(),
+            false,
         )
         .await
         .unwrap();
@@ -1246,6 +1332,38 @@ mod tests {
         assert!(result.rows[0].chunk_text.contains("Guide"));
         assert!(result.rows[0].chunk_text.contains("Hello world."));
         assert!(result.rows[0].metadata.contains("\"format\":\"html\""));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_skips_unchanged_files_without_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("note.txt");
+        fs::write(&text, "hello world").unwrap();
+
+        let mut existing_fingerprints = BTreeMap::new();
+        existing_fingerprints.insert(text.display().to_string(), fingerprint_path(&text).unwrap());
+
+        let embedder = Embedder::new("http://127.0.0.1:9".to_string(), "embed".to_string());
+        let result = ingest_path(
+            &text,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+            &existing_fingerprints,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.rows.is_empty());
+        assert!(result.source_paths.is_empty());
+        assert_eq!(result.stats.indexed_files, 0);
+        assert_eq!(result.stats.skipped_files, 1);
+        assert!(result.stats.errors.is_empty());
     }
 
     #[tokio::test]
@@ -1264,6 +1382,8 @@ mod tests {
             None,
             PdfParser::Native,
             &[],
+            false,
+            &BTreeMap::new(),
             false,
         )
         .await

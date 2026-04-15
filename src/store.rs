@@ -6,10 +6,12 @@ use anyhow::{bail, Context, Result};
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use futures::TryStreamExt;
 use lancedb::database::CreateTableMode;
 use lancedb::index::scalar::FtsIndexBuilder;
 use lancedb::index::Index;
 use lancedb::index::IndexType;
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::{connect, Connection, Table};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -186,6 +188,56 @@ pub fn ensure_metadata(
 }
 
 /// Replaces all rows for the provided source paths and inserts fresh rows.
+pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String, String>> {
+    let table = match db.open_table(DEFAULT_TABLE_NAME).execute().await {
+        Ok(table) => table,
+        Err(_) => return Ok(BTreeMap::new()),
+    };
+    let batches: Vec<RecordBatch> = table
+        .query()
+        .select(Select::columns(&["source_path", "metadata"]))
+        .execute()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut fingerprints = BTreeMap::new();
+    for batch in &batches {
+        let source_col = batch
+            .column_by_name("source_path")
+            .context("source_path column missing")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("source_path column type")?;
+        let metadata_col = batch
+            .column_by_name("metadata")
+            .context("metadata column missing")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("metadata column type")?;
+
+        for row_idx in 0..batch.num_rows() {
+            let source = source_col.value(row_idx);
+            let Ok(metadata): Result<serde_json::Value, _> =
+                serde_json::from_str(metadata_col.value(row_idx))
+            else {
+                continue;
+            };
+            let Some(fingerprint) = metadata
+                .get("source_fingerprint")
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            fingerprints
+                .entry(source.to_string())
+                .or_insert_with(|| fingerprint.to_string());
+        }
+    }
+
+    Ok(fingerprints)
+}
+
 pub async fn replace_source_rows(
     db: &Connection,
     rows: &[ChunkRow],
@@ -510,6 +562,33 @@ mod tests {
             metadata: "{}".to_string(),
             embedding: vec![value, value],
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_source_fingerprints_reads_metadata_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                ChunkRow {
+                    metadata: r#"{"source_fingerprint":"fp-a"}"#.to_string(),
+                    ..sample_row("a.txt", "alpha", 1.0)
+                },
+                ChunkRow {
+                    metadata: r#"{"source_fingerprint":"fp-b"}"#.to_string(),
+                    ..sample_row("b.txt", "beta", 2.0)
+                },
+            ],
+            &["a.txt".to_string(), "b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let fingerprints = load_source_fingerprints(&db).await.unwrap();
+        assert_eq!(fingerprints.get("a.txt"), Some(&"fp-a".to_string()));
+        assert_eq!(fingerprints.get("b.txt"), Some(&"fp-b".to_string()));
     }
 
     #[tokio::test]

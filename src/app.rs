@@ -14,6 +14,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             pdf_parser,
             exclude,
             include_hidden,
+            force,
         } => {
             commands::index::run(
                 name,
@@ -24,6 +25,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 pdf_parser,
                 exclude,
                 include_hidden,
+                force,
             )
             .await?
         }
