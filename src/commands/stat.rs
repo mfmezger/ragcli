@@ -74,66 +74,66 @@ async fn build_report(name: Option<&str>) -> Result<StatReport> {
 }
 
 fn print_human(report: &StatReport) {
-    tracing::info!("Store summary");
-    tracing::info!("  store: {}", report.store);
-    tracing::info!("  ollama url: {}", report.ollama_url);
-    tracing::info!("  rows embedded: {}", report.stats.total_chunks);
-    tracing::info!("  source files: {}", report.stats.unique_sources);
-    tracing::info!(
+    println!("Store summary");
+    println!("  store: {}", report.store);
+    println!("  ollama url: {}", report.ollama_url);
+    println!("  rows embedded: {}", report.stats.total_chunks);
+    println!("  source files: {}", report.stats.unique_sources);
+    println!(
         "  content mix: {} text, {} pdf, {} image, {} other",
         report.stats.content_kinds.text_files,
         report.stats.content_kinds.pdf_files,
         report.stats.content_kinds.image_files,
         report.stats.content_kinds.other_files
     );
-    tracing::info!("  pdf pages: {}", report.stats.pdf_pages);
-    tracing::info!("  embedded chars: {}", fmt_count(report.stats.total_chars));
-    tracing::info!(
+    println!("  pdf pages: {}", report.stats.pdf_pages);
+    println!("  embedded chars: {}", fmt_count(report.stats.total_chars));
+    println!(
         "  estimated embedded tokens: ~{}",
         fmt_count(report.stats.estimated_tokens)
     );
 
     if report.stats.total_chunks > 0 {
-        tracing::info!(
+        println!(
             "  avg chunk: {} chars, ~{} tokens",
             report.stats.total_chars / report.stats.total_chunks,
             report.stats.estimated_tokens / report.stats.total_chunks
         );
-        tracing::info!(
+        println!(
             "  chunk range: {}..{} chars",
             report.stats.min_chunk_chars, report.stats.max_chunk_chars
         );
     }
 
     if let Some(metadata) = &report.metadata {
-        tracing::info!(
+        println!(
             "  embedding: {} (dim {})",
             metadata.embed_model, metadata.embedding_dim
         );
-        tracing::info!(
+        println!(
             "  chunking: size {}, overlap {}",
             metadata.chunk_size, metadata.chunk_overlap
         );
     } else {
-        tracing::info!("  embedding: metadata missing");
+        println!("  embedding: metadata missing");
     }
 
-    tracing::info!("  disk usage: {}", fmt_bytes(report.disk_usage.total_bytes));
-    tracing::info!(
+    println!("  disk usage: {}", fmt_bytes(report.disk_usage.total_bytes));
+    println!(
         "    lancedb: {}",
         fmt_bytes(report.disk_usage.lancedb_bytes)
     );
-    tracing::info!("    meta: {}", fmt_bytes(report.disk_usage.meta_bytes));
-    tracing::info!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
-    tracing::info!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
+    println!("    meta: {}", fmt_bytes(report.disk_usage.meta_bytes));
+    println!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
+    println!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
     for warning in &report.warnings {
-        tracing::warn!("  warning: {}", warning);
+        eprintln!("  warning: {}", warning);
     }
 
     if !report.stats.top_sources.is_empty() {
-        tracing::info!("  top sources by chunk count:");
+        println!("  top sources by chunk count:");
         for source in &report.stats.top_sources {
-            tracing::info!(
+            println!(
                 "    - {}  [{} chunks, ~{} tokens]",
                 source.source_path,
                 fmt_count(source.chunks),

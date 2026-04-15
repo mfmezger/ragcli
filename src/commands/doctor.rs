@@ -137,52 +137,52 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
 }
 
 fn print_human(report: &DoctorReport) {
-    tracing::info!("Doctor report");
-    tracing::info!("  time: {}", format_unix_timestamp(report.time));
-    tracing::info!("  base: {} ({})", report.base.path, report.base.status);
-    tracing::info!("  store: {} ({})", report.store.path, report.store.status);
-    tracing::info!(
+    println!("Doctor report");
+    println!("  time: {}", format_unix_timestamp(report.time));
+    println!("  base: {} ({})", report.base.path, report.base.status);
+    println!("  store: {} ({})", report.store.path, report.store.status);
+    println!(
         "  config: {} ({})",
         report.config.path, report.config.status
     );
-    tracing::info!("  ollama url: {}", report.ollama_url);
-    tracing::info!("  embed model: {}", report.embed_model);
-    tracing::info!("  chat model: {}", report.chat_model);
-    tracing::info!("  vision model: {}", report.vision_model);
+    println!("  ollama url: {}", report.ollama_url);
+    println!("  embed model: {}", report.embed_model);
+    println!("  chat model: {}", report.chat_model);
+    println!("  vision model: {}", report.vision_model);
 
     if report.ollama_reachable {
-        tracing::info!("  ollama: reachable");
+        println!("  ollama: reachable");
         if let Some(installed_models) = &report.installed_models {
-            tracing::info!(
+            println!(
                 "  embed model installed: {}",
                 status(installed_models.embed_model_installed)
             );
-            tracing::info!(
+            println!(
                 "  chat model installed: {}",
                 status(installed_models.chat_model_installed)
             );
-            tracing::info!(
+            println!(
                 "  vision model installed: {}",
                 status(installed_models.vision_model_installed)
             );
         }
     } else if let Some(err) = &report.ollama_error {
-        tracing::error!("  ollama: unreachable ({})", err);
+        eprintln!("  ollama: unreachable ({})", err);
     }
 
-    tracing::info!(
+    println!(
         "  metadata: {} ({})",
         report.metadata.path, report.metadata.status
     );
     if let Some(metadata_summary) = &report.metadata_summary {
-        tracing::info!("  metadata summary: {}", metadata_summary);
+        println!("  metadata summary: {}", metadata_summary);
     }
     if let Some(metadata_error) = &report.metadata_error {
-        tracing::error!("  metadata error: {}", metadata_error);
+        eprintln!("  metadata error: {}", metadata_error);
     }
 
     for subdirectory in &report.subdirectories {
-        tracing::info!(
+        println!(
             "  {}: {} ({})",
             subdirectory.name, subdirectory.path, subdirectory.status
         );

@@ -21,10 +21,10 @@ use clap::Parser;
 use cli::Cli;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-static INIT: std::sync::Once = std::sync::Once::new();
+static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn init_tracing() {
-    INIT.call_once(|| {
+    INIT.get_or_init(|| {
         let filter = EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info"));
         tracing_subscriber::registry()
