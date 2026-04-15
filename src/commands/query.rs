@@ -512,27 +512,26 @@ fn print_query_plan(command: &QueryCommand, result: &SimpleQueryResult) {
         return;
     }
 
-    println!("Query plan:");
-    println!("  requested_mode: {}", mode_label(result.requested_mode));
-    println!("  execution_path: {}", result.execution_label);
-    println!("  top_k: {}", command.top_k);
-    println!("  fetch_k: {}", command.fetch_k);
-    println!("  max_iterations: {}", command.max_iterations);
-    println!("  rewrite: {}", command.rewrite);
-    println!("  rerank: {}", command.rerank);
-    println!(
+    tracing::debug!("Query plan:");
+    tracing::debug!("  requested_mode: {}", mode_label(result.requested_mode));
+    tracing::debug!("  execution_path: {}", result.execution_label);
+    tracing::debug!("  top_k: {}", command.top_k);
+    tracing::debug!("  fetch_k: {}", command.fetch_k);
+    tracing::debug!("  max_iterations: {}", command.max_iterations);
+    tracing::debug!("  rewrite: {}", command.rewrite);
+    tracing::debug!("  rerank: {}", command.rerank);
+    tracing::debug!(
         "  query_variants: {}",
         result.rewrite_set.query_variants().join(" | ")
     );
     if let Some(plan) = &result.plan {
-        println!("  question_type: {}", question_type_label(plan));
-        println!("  strategy: {}", strategy_label(plan));
-        println!("  reasoning: {}", plan.reasoning);
+        tracing::debug!("  question_type: {}", question_type_label(plan));
+        tracing::debug!("  strategy: {}", strategy_label(plan));
+        tracing::debug!("  reasoning: {}", plan.reasoning);
         if !plan.subqueries.is_empty() {
-            println!("  subqueries: {}", plan.subqueries.join(" | "));
+            tracing::debug!("  subqueries: {}", plan.subqueries.join(" | "));
         }
     }
-    println!();
 }
 
 fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -540,12 +539,12 @@ fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
         return;
     }
 
-    println!("Query trace:");
+    tracing::debug!("Query trace:");
     for entry in &result.trace {
-        println!("  - {entry}");
+        tracing::debug!("  - {entry}");
     }
     for iteration in &result.iterations {
-        println!(
+        tracing::debug!(
             "  - iteration {} summary: verdict={}, queries={}, kept={}",
             iteration.iteration,
             evidence_verdict_label(&iteration.sufficiency),
@@ -554,7 +553,7 @@ fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
         );
     }
     if let Some(check) = &result.support_check {
-        println!(
+        tracing::debug!(
             "  - support_check: {}",
             if check.supported {
                 "supported"
@@ -563,8 +562,7 @@ fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
             }
         );
     }
-    println!("  - retrieved_hits: {}", result.hits.len());
-    println!();
+    tracing::debug!("  - retrieved_hits: {}", result.hits.len());
 }
 
 fn print_scores(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -572,9 +570,9 @@ fn print_scores(command: &QueryCommand, result: &SimpleQueryResult) {
         return;
     }
 
-    println!("Scores:");
+    tracing::debug!("Scores:");
     for (idx, hit) in result.hits.iter().enumerate() {
-        println!(
+        tracing::debug!(
             "  [{}] best={:.6} fused={} rerank={} {}",
             idx + 1,
             hit.best_score().unwrap_or_default(),
@@ -583,7 +581,6 @@ fn print_scores(command: &QueryCommand, result: &SimpleQueryResult) {
             hit.source_path
         );
     }
-    println!();
 }
 
 fn print_citations(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -591,11 +588,10 @@ fn print_citations(command: &QueryCommand, result: &SimpleQueryResult) {
         return;
     }
 
-    println!("Citations:");
+    tracing::debug!("Citations:");
     for citation in render_citations(&result.hits) {
-        println!("  {citation}");
+        tracing::debug!("  {citation}");
     }
-    println!();
 }
 
 fn print_contexts(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -603,13 +599,12 @@ fn print_contexts(command: &QueryCommand, result: &SimpleQueryResult) {
         return;
     }
 
-    println!("Retrieved context:");
+    tracing::debug!("Retrieved context:");
     for (idx, hit) in result.hits.iter().enumerate() {
         let compact = retrieval_context(hit).replace('\n', " ");
         let preview: String = compact.chars().take(220).collect();
-        println!("  [{}] {}", idx + 1, preview);
+        tracing::debug!("  [{}] {}", idx + 1, preview);
     }
-    println!();
 }
 
 async fn generate_answer(

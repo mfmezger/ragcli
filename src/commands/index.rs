@@ -37,20 +37,24 @@ pub async fn run(
         cfg.ollama.base_url.clone(),
         resolve_model_name(&store, &cfg.models.vision),
     );
-    let result = ingest_path(
-        &path,
-        size,
-        overlap,
-        &embedder,
-        Some(&vision),
-        match pdf_parser.unwrap_or(PdfParserArg::Native) {
-            PdfParserArg::Native => PdfParser::Native,
-            PdfParserArg::Liteparse => PdfParser::Liteparse,
-        },
-        &exclude,
-        include_hidden,
-    )
-    .await?;
+
+    let span = tracing::info_span!("ingest_path", path = %path.display());
+    let result = span.in_scope(|| async {
+        ingest_path(
+            &path,
+            size,
+            overlap,
+            &embedder,
+            Some(&vision),
+            match pdf_parser.unwrap_or(PdfParserArg::Native) {
+                PdfParserArg::Native => PdfParser::Native,
+                PdfParserArg::Liteparse => PdfParser::Liteparse,
+            },
+            &exclude,
+            include_hidden,
+        )
+        .await
+    }).await?;
 
     if let Some(dim) = result.embedding_dim {
         ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
@@ -59,18 +63,19 @@ pub async fn run(
     let db = connect_db(&store).await?;
     replace_source_rows(&db, &result.rows, &result.source_paths).await?;
 
-    println!("Index complete");
-    println!("  store: {}", store.display());
-    println!("  source: {}", path.display());
-    println!("  indexed files: {}", result.stats.indexed_files);
-    println!("  skipped files: {}", result.stats.skipped_files);
-    println!("  chunks written: {}", result.stats.total_chunks);
-    println!("  elapsed: {:.2?}", started.elapsed());
+    tracing::info!(
+        store = %store.display(),
+        source = %path.display(),
+        indexed_files = result.stats.indexed_files,
+        skipped_files = result.stats.skipped_files,
+        chunks_written = result.stats.total_chunks,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Index complete"
+    );
 
     if !result.stats.errors.is_empty() {
-        println!("  errors:");
         for err in &result.stats.errors {
-            println!("    - {}", err);
+            tracing::warn!(error = %err, "index error");
         }
     }
 

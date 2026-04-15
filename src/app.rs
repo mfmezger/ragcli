@@ -5,6 +5,10 @@ use anyhow::Result;
 pub async fn run(cli: Cli) -> Result<()> {
     let name = cli.name.as_deref();
 
+    tracing::info!(name = name.unwrap_or("default"), "starting ragcli");
+    let span = tracing::info_span!("command dispatch", name = name.unwrap_or("default"));
+    let _guard = span.enter();
+
     match cli.command {
         Command::Index {
             path,
