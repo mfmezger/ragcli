@@ -194,16 +194,14 @@ pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String
         Err(LanceDbError::TableNotFound { .. }) => return Ok(BTreeMap::new()),
         Err(err) => return Err(err.into()),
     };
-    let batches: Vec<RecordBatch> = table
+    let mut stream = table
         .query()
         .select(Select::columns(&["source_path", "metadata"]))
         .execute()
-        .await?
-        .try_collect::<Vec<_>>()
         .await?;
 
     let mut fingerprints = BTreeMap::new();
-    for batch in &batches {
+    while let Some(batch) = stream.try_next().await? {
         let source_col = batch
             .column_by_name("source_path")
             .context("source_path column missing")?
@@ -219,6 +217,10 @@ pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String
 
         for row_idx in 0..batch.num_rows() {
             let source = source_col.value(row_idx);
+            if fingerprints.contains_key(source) {
+                continue;
+            }
+
             let Ok(metadata): Result<serde_json::Value, _> =
                 serde_json::from_str(metadata_col.value(row_idx))
             else {
