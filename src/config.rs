@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_STORE_NAME: &str = "default";
+pub const STORE_SUBDIRECTORIES: [&str; 4] = ["lancedb", "meta", "cache", "models"];
 pub const ENV_OLLAMA_URL: &str = "RAGCLI_OLLAMA_URL";
 pub const ENV_EMBED_MODEL: &str = "RAGCLI_EMBED_MODEL";
 pub const ENV_CHAT_MODEL: &str = "RAGCLI_CHAT_MODEL";
@@ -95,7 +96,8 @@ impl Default for Config {
 }
 
 /// Indicates where a resolved config value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "env_var")]
 pub enum ConfigValueSource {
     /// The value came from the store config file.
     File,
@@ -104,7 +106,7 @@ pub enum ConfigValueSource {
 }
 
 /// Tracks the source of config values after environment overrides are applied.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigSources {
     /// Source of `ollama.base_url`.
     pub ollama_base_url: ConfigValueSource,
@@ -166,10 +168,9 @@ pub fn config_path(store: &Path) -> PathBuf {
 
 /// Ensures the on-disk directory layout for a store exists.
 pub fn ensure_store_layout(store: &Path) -> Result<()> {
-    fs::create_dir_all(store.join("lancedb"))?;
-    fs::create_dir_all(store.join("meta"))?;
-    fs::create_dir_all(store.join("cache"))?;
-    fs::create_dir_all(store.join("models"))?;
+    for subdirectory in STORE_SUBDIRECTORIES {
+        fs::create_dir_all(store.join(subdirectory))?;
+    }
     Ok(())
 }
 
@@ -447,6 +448,18 @@ overlap = 200
                 format!("ollama.base_url <- {}", ENV_OLLAMA_URL),
                 format!("models.chat <- {}", ENV_CHAT_MODEL),
             ]
+        );
+    }
+
+    #[test]
+    fn test_config_value_source_serializes_with_consistent_shape() {
+        let file = serde_json::to_value(ConfigValueSource::File).unwrap();
+        let env = serde_json::to_value(ConfigValueSource::Env(ENV_CHAT_MODEL)).unwrap();
+
+        assert_eq!(file, serde_json::json!({"kind": "File"}));
+        assert_eq!(
+            env,
+            serde_json::json!({"kind": "Env", "env_var": ENV_CHAT_MODEL})
         );
     }
 

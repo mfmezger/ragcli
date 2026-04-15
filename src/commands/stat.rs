@@ -1,22 +1,51 @@
-use crate::config::{ensure_store_layout, load_or_create_config, store_dir};
-use crate::store::{collect_store_stats, connect_db, load_metadata};
+use crate::config::{ensure_store_layout, load_or_create_config, store_dir, STORE_SUBDIRECTORIES};
+use crate::store::{
+    collect_store_stats, connect_db, load_metadata, StoreMetadata, StoreStats, DEFAULT_TABLE_NAME,
+};
 use anyhow::Result;
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
+use serde::Serialize;
 use std::path::Path;
+use walkdir::WalkDir;
 
-pub async fn run(name: Option<&str>) -> Result<()> {
+#[derive(Debug, Serialize)]
+pub struct DiskUsageReport {
+    pub total_bytes: u64,
+    pub lancedb_bytes: u64,
+    pub meta_bytes: u64,
+    pub cache_bytes: u64,
+    pub models_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatReport {
+    pub store: String,
+    pub ollama_url: String,
+    pub stats: StoreStats,
+    pub metadata: Option<StoreMetadata>,
+    pub disk_usage: DiskUsageReport,
+    pub warnings: Vec<String>,
+}
+
+pub async fn run(name: Option<&str>, json: bool) -> Result<()> {
+    let report = build_report(name).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_human(&report);
+    }
+    Ok(())
+}
+
+async fn build_report(name: Option<&str>) -> Result<StatReport> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let cfg = load_or_create_config(&store)?;
     let metadata = load_metadata(&store).ok();
     let db = connect_db(&store).await?;
 
-    let table = match db
-        .open_table(crate::store::DEFAULT_TABLE_NAME)
-        .execute()
-        .await
-    {
+    let table = match db.open_table(DEFAULT_TABLE_NAME).execute().await {
         Ok(table) => Some(table),
         Err(_) => None,
     };
@@ -32,44 +61,51 @@ pub async fn run(name: Option<&str>) -> Result<()> {
     }
 
     let stats = collect_store_stats(&batches, 5)?;
-    let total_store_bytes = dir_size_bytes(&store)?;
-    let lancedb_bytes = dir_size_bytes(&store.join("lancedb"))?;
-    let meta_bytes = dir_size_bytes(&store.join("meta"))?;
-    let cache_bytes = dir_size_bytes(&store.join("cache"))?;
-    let models_bytes = dir_size_bytes(&store.join("models"))?;
+    let (disk_usage, warnings) = collect_disk_usage(&store);
 
+    Ok(StatReport {
+        store: store.display().to_string(),
+        ollama_url: cfg.ollama.base_url,
+        stats,
+        metadata,
+        disk_usage,
+        warnings,
+    })
+}
+
+fn print_human(report: &StatReport) {
     println!("Store summary");
-    println!("  store: {}", store.display());
-    println!("  ollama url: {}", cfg.ollama.base_url);
-    println!("  rows embedded: {}", stats.total_chunks);
-    println!("  source files: {}", stats.unique_sources);
+    println!("  store: {}", report.store);
+    println!("  ollama url: {}", report.ollama_url);
+    println!("  rows embedded: {}", report.stats.total_chunks);
+    println!("  source files: {}", report.stats.unique_sources);
     println!(
         "  content mix: {} text, {} pdf, {} image, {} other",
-        stats.content_kinds.text_files,
-        stats.content_kinds.pdf_files,
-        stats.content_kinds.image_files,
-        stats.content_kinds.other_files
+        report.stats.content_kinds.text_files,
+        report.stats.content_kinds.pdf_files,
+        report.stats.content_kinds.image_files,
+        report.stats.content_kinds.other_files
     );
-    println!("  pdf pages: {}", stats.pdf_pages);
-    println!("  embedded chars: {}", fmt_count(stats.total_chars));
+    println!("  pdf pages: {}", report.stats.pdf_pages);
+    println!("  embedded chars: {}", fmt_count(report.stats.total_chars));
     println!(
         "  estimated embedded tokens: ~{}",
-        fmt_count(stats.estimated_tokens)
+        fmt_count(report.stats.estimated_tokens)
     );
 
-    if stats.total_chunks > 0 {
+    if report.stats.total_chunks > 0 {
         println!(
             "  avg chunk: {} chars, ~{} tokens",
-            stats.total_chars / stats.total_chunks,
-            stats.estimated_tokens / stats.total_chunks
+            report.stats.total_chars / report.stats.total_chunks,
+            report.stats.estimated_tokens / report.stats.total_chunks
         );
         println!(
             "  chunk range: {}..{} chars",
-            stats.min_chunk_chars, stats.max_chunk_chars
+            report.stats.min_chunk_chars, report.stats.max_chunk_chars
         );
     }
 
-    if let Some(metadata) = metadata {
+    if let Some(metadata) = &report.metadata {
         println!(
             "  embedding: {} (dim {})",
             metadata.embed_model, metadata.embedding_dim
@@ -82,25 +118,29 @@ pub async fn run(name: Option<&str>) -> Result<()> {
         println!("  embedding: metadata missing");
     }
 
-    println!("  disk usage: {}", fmt_bytes(total_store_bytes));
-    println!("    lancedb: {}", fmt_bytes(lancedb_bytes));
-    println!("    meta: {}", fmt_bytes(meta_bytes));
-    println!("    cache: {}", fmt_bytes(cache_bytes));
-    println!("    models: {}", fmt_bytes(models_bytes));
+    println!("  disk usage: {}", fmt_bytes(report.disk_usage.total_bytes));
+    println!(
+        "    lancedb: {}",
+        fmt_bytes(report.disk_usage.lancedb_bytes)
+    );
+    println!("    meta: {}", fmt_bytes(report.disk_usage.meta_bytes));
+    println!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
+    println!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
+    for warning in &report.warnings {
+        println!("  warning: {}", warning);
+    }
 
-    if !stats.top_sources.is_empty() {
+    if !report.stats.top_sources.is_empty() {
         println!("  top sources by chunk count:");
-        for source in &stats.top_sources {
+        for source in &report.stats.top_sources {
             println!(
                 "    - {}  [{} chunks, ~{} tokens]",
                 source.source_path,
-                source.chunks,
+                fmt_count(source.chunks),
                 fmt_count(source.estimated_tokens)
             );
         }
     }
-
-    Ok(())
 }
 
 pub fn dir_size_bytes(path: &Path) -> Result<u64> {
@@ -120,6 +160,67 @@ pub fn dir_size_bytes(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+fn collect_disk_usage(store: &Path) -> (DiskUsageReport, Vec<String>) {
+    let mut report = DiskUsageReport {
+        total_bytes: 0,
+        lancedb_bytes: 0,
+        meta_bytes: 0,
+        cache_bytes: 0,
+        models_bytes: 0,
+    };
+    let mut warnings = Vec::new();
+
+    if !store.exists() {
+        return (report, warnings);
+    }
+
+    for entry in WalkDir::new(store) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warnings.push(format!("skipped unreadable path: {err}"));
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let bytes = match entry.metadata() {
+            Ok(metadata) => metadata.len(),
+            Err(err) => {
+                warnings.push(format!(
+                    "skipped unreadable file {}: {}",
+                    entry.path().display(),
+                    err
+                ));
+                continue;
+            }
+        };
+        report.total_bytes += bytes;
+
+        let Ok(relative_path) = entry.path().strip_prefix(store) else {
+            continue;
+        };
+        let Some(first_component) = relative_path.components().next() else {
+            continue;
+        };
+        let Some(name) = first_component.as_os_str().to_str() else {
+            continue;
+        };
+
+        match name {
+            "lancedb" => report.lancedb_bytes += bytes,
+            "meta" => report.meta_bytes += bytes,
+            "cache" => report.cache_bytes += bytes,
+            "models" => report.models_bytes += bytes,
+            _ => {}
+        }
+    }
+
+    (report, warnings)
 }
 
 pub fn fmt_bytes(bytes: u64) -> String {
@@ -180,11 +281,41 @@ mod tests {
         assert_eq!(dir_size_bytes(dir.path()).unwrap(), 8);
     }
 
+    #[test]
+    fn test_collect_disk_usage_walks_store_once_and_keeps_root_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        for subdirectory in STORE_SUBDIRECTORIES {
+            std::fs::create_dir_all(store.join(subdirectory)).unwrap();
+        }
+        std::fs::write(store.join("config.toml"), b"abc").unwrap();
+        std::fs::write(store.join("lancedb").join("data.bin"), b"12345").unwrap();
+        std::fs::write(store.join("meta").join("store.toml"), b"12").unwrap();
+        std::fs::write(store.join("cache").join("blob.bin"), b"1234").unwrap();
+        std::fs::write(store.join("models").join("weights.gguf"), b"123456").unwrap();
+        std::fs::create_dir_all(store.join("other")).unwrap();
+        std::fs::write(store.join("other").join("extra.bin"), b"1234567").unwrap();
+
+        let (report, warnings) = collect_disk_usage(&store);
+
+        assert!(warnings.is_empty());
+        assert_eq!(report.total_bytes, 27);
+        assert_eq!(report.lancedb_bytes, 5);
+        assert_eq!(report.meta_bytes, 2);
+        assert_eq!(report.cache_bytes, 4);
+        assert_eq!(report.models_bytes, 6);
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn test_run_succeeds_on_empty_store() {
+    async fn test_build_report_supports_empty_store() {
         let dir = tempfile::tempdir().unwrap();
         with_test_env(dir.path(), None, || async {
-            run(Some("empty")).await.unwrap();
+            let report = build_report(Some("empty")).await.unwrap();
+            assert_eq!(report.stats.total_chunks, 0);
+            assert!(serde_json::to_string(&report)
+                .unwrap()
+                .contains("\"stats\""));
         })
         .await;
     }

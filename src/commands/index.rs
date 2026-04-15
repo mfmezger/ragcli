@@ -105,7 +105,7 @@ mod tests {
             )
             .await
             .unwrap();
-            stat::run(Some("e2e")).await.unwrap();
+            stat::run(Some("e2e"), false).await.unwrap();
         })
         .await;
     }

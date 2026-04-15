@@ -123,16 +123,28 @@ pub enum Command {
         command: ConfigCommand,
     },
     /// Shows a summary of indexed content and store usage.
-    Stat,
+    Stat {
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Checks store layout and runtime dependencies.
-    Doctor,
+    Doctor {
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 /// Configuration subcommands.
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {
     /// Prints the effective configuration for the selected store.
-    Show,
+    Show {
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Sets a config key in `~/.config/ragcli/<name>/config.toml`.
     Set {
         /// Configuration key such as `models.embed` or `ollama.base_url`.
@@ -212,6 +224,29 @@ mod tests {
                 assert_eq!(max_iterations, 2);
             }
             command => panic!("expected query command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn test_json_flags_parse_for_supported_commands() {
+        let stat = Cli::try_parse_from(["ragcli", "stat", "--json"]).unwrap();
+        match stat.command {
+            Command::Stat { json } => assert!(json),
+            command => panic!("expected stat command, got {command:?}"),
+        }
+
+        let doctor = Cli::try_parse_from(["ragcli", "doctor", "--json"]).unwrap();
+        match doctor.command {
+            Command::Doctor { json } => assert!(json),
+            command => panic!("expected doctor command, got {command:?}"),
+        }
+
+        let config = Cli::try_parse_from(["ragcli", "config", "show", "--json"]).unwrap();
+        match config.command {
+            Command::Config {
+                command: ConfigCommand::Show { json },
+            } => assert!(json),
+            command => panic!("expected config show command, got {command:?}"),
         }
     }
 }
