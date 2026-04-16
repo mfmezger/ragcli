@@ -63,6 +63,17 @@ pub struct StoreMetadata {
     pub chunk_overlap: usize,
 }
 
+/// Per-source change detection data loaded from stored chunk metadata.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SourceFingerprint {
+    /// Stable content fingerprint for the source file.
+    pub fingerprint: String,
+    /// Source file size in bytes at indexing time.
+    pub size_bytes: u64,
+    /// Source file modification time in Unix milliseconds at indexing time.
+    pub modified_unix_ms: u64,
+}
+
 /// Counts of source files by content kind.
 #[derive(Debug, Default, Serialize)]
 pub struct ContentKindCounts {
@@ -187,8 +198,10 @@ pub fn ensure_metadata(
     Ok(())
 }
 
-/// Replaces all rows for the provided source paths and inserts fresh rows.
-pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String, String>> {
+/// Loads stored per-source fingerprint data from chunk metadata.
+pub async fn load_source_fingerprints(
+    db: &Connection,
+) -> Result<BTreeMap<String, SourceFingerprint>> {
     let table = match db.open_table(DEFAULT_TABLE_NAME).execute().await {
         Ok(table) => table,
         Err(LanceDbError::TableNotFound { .. }) => return Ok(BTreeMap::new()),
@@ -232,9 +245,19 @@ pub async fn load_source_fingerprints(db: &Connection) -> Result<BTreeMap<String
             else {
                 continue;
             };
-            fingerprints
-                .entry(source.to_string())
-                .or_insert_with(|| fingerprint.to_string());
+            let size_bytes = metadata
+                .get("source_size_bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            let modified_unix_ms = metadata
+                .get("source_modified_unix_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            fingerprints.entry(source.to_string()).or_insert_with(|| SourceFingerprint {
+                fingerprint: fingerprint.to_string(),
+                size_bytes,
+                modified_unix_ms,
+            });
         }
     }
 
@@ -590,8 +613,22 @@ mod tests {
         .unwrap();
 
         let fingerprints = load_source_fingerprints(&db).await.unwrap();
-        assert_eq!(fingerprints.get("a.txt"), Some(&"fp-a".to_string()));
-        assert_eq!(fingerprints.get("b.txt"), Some(&"fp-b".to_string()));
+        assert_eq!(
+            fingerprints.get("a.txt"),
+            Some(&SourceFingerprint {
+                fingerprint: "fp-a".to_string(),
+                size_bytes: 0,
+                modified_unix_ms: 0,
+            })
+        );
+        assert_eq!(
+            fingerprints.get("b.txt"),
+            Some(&SourceFingerprint {
+                fingerprint: "fp-b".to_string(),
+                size_bytes: 0,
+                modified_unix_ms: 0,
+            })
+        );
     }
 
     #[tokio::test]

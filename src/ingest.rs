@@ -2,7 +2,7 @@
 
 use crate::models::{Embedder, VisionCaptioner};
 use crate::source_kind::SourceKind;
-use crate::store::ChunkRow;
+use crate::store::{ChunkRow, SourceFingerprint};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -14,6 +14,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::UNIX_EPOCH;
 use walkdir::{DirEntry, WalkDir};
 
 /// Aggregated indexing counters for a single ingest run.
@@ -74,7 +75,7 @@ pub async fn ingest_path(
     pdf_parser: PdfParser,
     exclude_patterns: &[String],
     include_hidden: bool,
-    existing_fingerprints: &BTreeMap<String, String>,
+    existing_fingerprints: &BTreeMap<String, SourceFingerprint>,
     force: bool,
 ) -> Result<IngestResult> {
     let options = build_ingest_options(exclude_patterns, include_hidden)?;
@@ -99,7 +100,31 @@ pub async fn ingest_path(
         }
 
         let source_path = file.display().to_string();
-        let source_fingerprint = match fingerprint_path(&file) {
+        let source_state = match source_file_state(&file) {
+            Ok(state) => state,
+            Err(err) => {
+                stats.skipped_files += 1;
+                stats.errors.push(format!("{}: {}", file.display(), err));
+                progress.inc(1);
+                continue;
+            }
+        };
+
+        if !force
+            && existing_fingerprints
+                .get(&source_path)
+                .is_some_and(|existing| {
+                    existing.size_bytes == source_state.size_bytes
+                        && existing.modified_unix_ms == source_state.modified_unix_ms
+                })
+        {
+            stats.skipped_files += 1;
+            progress.set_message(format!("Skipping unchanged {}", display_name(&file)));
+            progress.inc(1);
+            continue;
+        }
+
+        let source_fingerprint = match fingerprint_path(&file, source_state) {
             Ok(fingerprint) => fingerprint,
             Err(err) => {
                 stats.skipped_files += 1;
@@ -112,7 +137,7 @@ pub async fn ingest_path(
         if !force
             && existing_fingerprints
                 .get(&source_path)
-                .is_some_and(|fingerprint| fingerprint == &source_fingerprint)
+                .is_some_and(|existing| existing == &source_fingerprint)
         {
             stats.skipped_files += 1;
             progress.set_message(format!("Skipping unchanged {}", display_name(&file)));
@@ -267,7 +292,7 @@ async fn extract_units(
 
 async fn embed_units(
     path: &Path,
-    source_fingerprint: &str,
+    source_fingerprint: &SourceFingerprint,
     units: Vec<ExtractedUnit>,
     embedder: &Embedder,
     dim: &mut Option<usize>,
@@ -300,7 +325,7 @@ async fn embed_units(
 
 async fn embed_chunks(
     path: &Path,
-    source_fingerprint: &str,
+    source_fingerprint: &SourceFingerprint,
     page_num: i32,
     chunks: Vec<ChunkContent>,
     embedder: &Embedder,
@@ -317,7 +342,18 @@ async fn embed_chunks(
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("source".to_string(), json!(path.display().to_string()));
             obj.insert("page".to_string(), json!(page_num));
-            obj.insert("source_fingerprint".to_string(), json!(source_fingerprint));
+            obj.insert(
+                "source_fingerprint".to_string(),
+                json!(source_fingerprint.fingerprint),
+            );
+            obj.insert(
+                "source_size_bytes".to_string(),
+                json!(source_fingerprint.size_bytes),
+            );
+            obj.insert(
+                "source_modified_unix_ms".to_string(),
+                json!(source_fingerprint.modified_unix_ms),
+            );
         }
         let format = metadata
             .get("format")
@@ -396,7 +432,24 @@ fn is_hidden_path(path: &Path) -> bool {
         .map(|name| name.to_string_lossy().starts_with('.'))
         .unwrap_or(false)
 }
-fn fingerprint_path(path: &Path) -> Result<String> {
+fn source_file_state(path: &Path) -> Result<SourceFingerprint> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read file metadata for fingerprinting: {}", path.display()))?;
+    let modified_unix_ms = metadata
+        .modified()
+        .with_context(|| format!("read file mtime for fingerprinting: {}", path.display()))?
+        .duration_since(UNIX_EPOCH)
+        .with_context(|| format!("file mtime predates unix epoch: {}", path.display()))?
+        .as_millis() as u64;
+
+    Ok(SourceFingerprint {
+        fingerprint: String::new(),
+        size_bytes: metadata.len(),
+        modified_unix_ms,
+    })
+}
+
+fn fingerprint_path(path: &Path, source_state: SourceFingerprint) -> Result<SourceFingerprint> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("open file for fingerprinting: {}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -412,7 +465,10 @@ fn fingerprint_path(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
 
-    Ok(to_hex(&hasher.finalize()))
+    Ok(SourceFingerprint {
+        fingerprint: to_hex(&hasher.finalize()),
+        ..source_state
+    })
 }
 
 fn load_text_file(path: &Path) -> Result<String> {
@@ -1239,10 +1295,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("note.txt");
         fs::write(&path, "hello").unwrap();
-        let first = fingerprint_path(&path).unwrap();
+        let first = fingerprint_path(&path, source_file_state(&path).unwrap()).unwrap();
 
         fs::write(&path, "jello").unwrap();
-        let second = fingerprint_path(&path).unwrap();
+        let second = fingerprint_path(&path, source_file_state(&path).unwrap()).unwrap();
 
         assert_ne!(first, second);
     }
@@ -1347,7 +1403,11 @@ mod tests {
         fs::write(&text, "hello world").unwrap();
 
         let mut existing_fingerprints = BTreeMap::new();
-        existing_fingerprints.insert(text.display().to_string(), fingerprint_path(&text).unwrap());
+        let source_state = source_file_state(&text).unwrap();
+        existing_fingerprints.insert(
+            text.display().to_string(),
+            fingerprint_path(&text, source_state).unwrap(),
+        );
 
         let embedder = Embedder::new("http://127.0.0.1:9".to_string(), "embed".to_string());
         let result = ingest_path(
@@ -1367,6 +1427,44 @@ mod tests {
 
         assert!(result.rows.is_empty());
         assert!(result.source_paths.is_empty());
+        assert_eq!(result.stats.indexed_files, 0);
+        assert_eq!(result.stats.skipped_files, 1);
+        assert!(result.stats.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_skips_by_size_and_mtime_before_hashing() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("note.txt");
+        fs::write(&text, "hello world").unwrap();
+
+        let source_state = source_file_state(&text).unwrap();
+        let mut existing_fingerprints = BTreeMap::new();
+        existing_fingerprints.insert(
+            text.display().to_string(),
+            SourceFingerprint {
+                fingerprint: "stale-fingerprint".to_string(),
+                ..source_state
+            },
+        );
+
+        let embedder = Embedder::new("http://127.0.0.1:9".to_string(), "embed".to_string());
+        let result = ingest_path(
+            &text,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+            &existing_fingerprints,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.rows.is_empty());
         assert_eq!(result.stats.indexed_files, 0);
         assert_eq!(result.stats.skipped_files, 1);
         assert!(result.stats.errors.is_empty());
