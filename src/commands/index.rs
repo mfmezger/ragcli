@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::ingest::{ingest_path, PdfParser};
 use crate::models::{Embedder, VisionCaptioner};
-use crate::store::{connect_db, ensure_metadata, replace_source_rows};
+use crate::store::{connect_db, ensure_metadata, load_source_fingerprints, replace_source_rows};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -20,6 +20,7 @@ pub async fn run(
     pdf_parser: Option<PdfParserArg>,
     exclude: Vec<String>,
     include_hidden: bool,
+    force: bool,
 ) -> Result<()> {
     let started = Instant::now();
     let store = store_dir(name)?;
@@ -38,6 +39,12 @@ pub async fn run(
         cfg.ollama.base_url.clone(),
         resolve_model_name(&store, &cfg.models.vision),
     );
+    let db = connect_db(&store).await?;
+    let existing_fingerprints = if force {
+        Default::default()
+    } else {
+        load_source_fingerprints(&db).await?
+    };
 
     let span = tracing::info_span!("ingest_path", path = %path.display());
     let result = ingest_path(
@@ -52,6 +59,8 @@ pub async fn run(
         },
         &exclude,
         include_hidden,
+        &existing_fingerprints,
+        force,
     )
     .instrument(span)
     .await?;
@@ -60,8 +69,9 @@ pub async fn run(
         ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
     }
 
-    let db = connect_db(&store).await?;
-    replace_source_rows(&db, &result.rows, &result.source_paths).await?;
+    if !result.source_paths.is_empty() {
+        replace_source_rows(&db, &result.rows, &result.source_paths).await?;
+    }
 
     println!(
         "Index complete: {} files, {} chunks, {} skipped, {}ms",
@@ -84,7 +94,10 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::commands::stat;
+    use crate::store::{connect_db, extract_contexts, DEFAULT_TABLE_NAME};
     use crate::test_support::{sequential_json_server, with_test_env};
+    use futures::TryStreamExt;
+    use lancedb::query::ExecutableQuery;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_indexes_file_with_mock_ollama() {
@@ -105,10 +118,123 @@ mod tests {
                 None,
                 Vec::new(),
                 false,
+                false,
             )
             .await
             .unwrap();
             stat::run(Some("e2e"), false).await.unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_skips_unchanged_file_without_reembedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let input = docs.join("note.txt");
+        std::fs::write(&input, "The project is a local RAG CLI.").unwrap();
+
+        let first_server = sequential_json_server(vec![r#"{"embeddings":[[0.1,0.2]]}"#]);
+        with_test_env(dir.path(), Some(&first_server), || async {
+            run(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        with_test_env(dir.path(), Some("http://127.0.0.1:9"), || async {
+            run(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_run_replaces_rows_when_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        let input = docs.join("note.txt");
+        std::fs::write(&input, "old content").unwrap();
+
+        let first_server = sequential_json_server(vec![r#"{"embeddings":[[0.1,0.2]]}"#]);
+        with_test_env(dir.path(), Some(&first_server), || async {
+            run(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        std::fs::write(&input, "new content").unwrap();
+
+        let second_server = sequential_json_server(vec![r#"{"embeddings":[[0.3,0.4]]}"#]);
+        with_test_env(dir.path(), Some(&second_server), || async {
+            run(
+                Some("e2e"),
+                input.clone(),
+                Some(200),
+                Some(0),
+                None,
+                None,
+                Vec::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+
+        with_test_env(dir.path(), None, || async {
+            let store = store_dir(Some("e2e")).unwrap();
+            let db = connect_db(&store).await.unwrap();
+            let table = db.open_table(DEFAULT_TABLE_NAME).execute().await.unwrap();
+            let batches = table
+                .query()
+                .execute()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let contexts = extract_contexts(&batches).unwrap();
+
+            assert_eq!(contexts.len(), 1);
+            assert!(contexts[0].contains("new content"));
+            assert!(!contexts[0].contains("old content"));
         })
         .await;
     }
