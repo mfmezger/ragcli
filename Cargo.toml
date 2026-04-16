@@ -41,6 +41,8 @@ xdg = "2"
 # Arrow types for constructing record batches.
 arrow-array = "57"
 arrow-schema = "57"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 reqwest-middleware = "0.4"

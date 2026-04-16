@@ -532,7 +532,6 @@ fn print_query_plan(command: &QueryCommand, result: &SimpleQueryResult) {
             println!("  subqueries: {}", plan.subqueries.join(" | "));
         }
     }
-    println!();
 }
 
 fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -564,7 +563,6 @@ fn print_query_trace(command: &QueryCommand, result: &SimpleQueryResult) {
         );
     }
     println!("  - retrieved_hits: {}", result.hits.len());
-    println!();
 }
 
 fn print_scores(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -583,7 +581,6 @@ fn print_scores(command: &QueryCommand, result: &SimpleQueryResult) {
             hit.source_path
         );
     }
-    println!();
 }
 
 fn print_citations(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -595,7 +592,6 @@ fn print_citations(command: &QueryCommand, result: &SimpleQueryResult) {
     for citation in render_citations(&result.hits) {
         println!("  {citation}");
     }
-    println!();
 }
 
 fn print_contexts(command: &QueryCommand, result: &SimpleQueryResult) {
@@ -609,7 +605,6 @@ fn print_contexts(command: &QueryCommand, result: &SimpleQueryResult) {
         let preview: String = compact.chars().take(220).collect();
         println!("  [{}] {}", idx + 1, preview);
     }
-    println!();
 }
 
 async fn generate_answer(

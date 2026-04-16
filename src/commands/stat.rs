@@ -127,7 +127,7 @@ fn print_human(report: &StatReport) {
     println!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
     println!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
     for warning in &report.warnings {
-        println!("  warning: {}", warning);
+        eprintln!("  warning: {}", warning);
     }
 
     if !report.stats.top_sources.is_empty() {
