@@ -167,7 +167,7 @@ fn print_human(report: &DoctorReport) {
             );
         }
     } else if let Some(err) = &report.ollama_error {
-        println!("  ollama: unreachable ({})", err);
+        eprintln!("  ollama: unreachable ({})", err);
     }
 
     println!(
@@ -178,7 +178,7 @@ fn print_human(report: &DoctorReport) {
         println!("  metadata summary: {}", metadata_summary);
     }
     if let Some(metadata_error) = &report.metadata_error {
-        println!("  metadata error: {}", metadata_error);
+        eprintln!("  metadata error: {}", metadata_error);
     }
 
     for subdirectory in &report.subdirectories {

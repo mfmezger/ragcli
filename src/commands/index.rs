@@ -9,6 +9,7 @@ use crate::store::{connect_db, ensure_metadata, replace_source_rows};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Instant;
+use tracing::Instrument;
 
 pub async fn run(
     name: Option<&str>,
@@ -37,6 +38,8 @@ pub async fn run(
         cfg.ollama.base_url.clone(),
         resolve_model_name(&store, &cfg.models.vision),
     );
+
+    let span = tracing::info_span!("ingest_path", path = %path.display());
     let result = ingest_path(
         &path,
         size,
@@ -50,6 +53,7 @@ pub async fn run(
         &exclude,
         include_hidden,
     )
+    .instrument(span)
     .await?;
 
     if let Some(dim) = result.embedding_dim {
@@ -59,18 +63,17 @@ pub async fn run(
     let db = connect_db(&store).await?;
     replace_source_rows(&db, &result.rows, &result.source_paths).await?;
 
-    println!("Index complete");
-    println!("  store: {}", store.display());
-    println!("  source: {}", path.display());
-    println!("  indexed files: {}", result.stats.indexed_files);
-    println!("  skipped files: {}", result.stats.skipped_files);
-    println!("  chunks written: {}", result.stats.total_chunks);
-    println!("  elapsed: {:.2?}", started.elapsed());
+    println!(
+        "Index complete: {} files, {} chunks, {} skipped, {}ms",
+        result.stats.indexed_files,
+        result.stats.total_chunks,
+        result.stats.skipped_files,
+        started.elapsed().as_millis()
+    );
 
     if !result.stats.errors.is_empty() {
-        println!("  errors:");
         for err in &result.stats.errors {
-            println!("    - {}", err);
+            eprintln!("index error: {err}");
         }
     }
 
