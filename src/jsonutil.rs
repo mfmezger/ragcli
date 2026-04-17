@@ -84,12 +84,7 @@ mod tests {
 
     #[test]
     fn test_parse_json_includes_raw_snippet_in_error() {
-        #[derive(Debug, serde::Deserialize)]
-        struct Foo {
-            a: i32,
-        }
-
-        let err = parse_json::<Foo>("not json at all", "parse foo").unwrap_err();
+        let err = parse_json::<serde_json::Value>("not json at all", "parse foo").unwrap_err();
         let err_msg = err.to_string();
         assert!(err_msg.contains("parse foo"));
         assert!(err_msg.contains("not json"));
