@@ -332,7 +332,7 @@ pub async fn list_indexed_sources(db: &Connection) -> Result<Vec<IndexedSource>>
         return Ok(Vec::new());
     };
 
-    let batches = table
+    let mut stream = table
         .query()
         .select(Select::columns(&[
             "source_path",
@@ -341,10 +341,13 @@ pub async fn list_indexed_sources(db: &Connection) -> Result<Vec<IndexedSource>>
             "format",
         ]))
         .execute()
-        .await?
-        .try_collect::<Vec<_>>()
         .await?;
-    collect_indexed_sources(&batches)
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_sources(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_sources(sources, pages_by_source))
 }
 
 /// Lists lightweight indexed source metadata without scanning chunk text.
@@ -353,7 +356,7 @@ pub async fn list_indexed_source_summaries(db: &Connection) -> Result<Vec<Indexe
         return Ok(Vec::new());
     };
 
-    let batches = table
+    let mut stream = table
         .query()
         .select(Select::columns(&[
             "source_path",
@@ -362,10 +365,13 @@ pub async fn list_indexed_source_summaries(db: &Connection) -> Result<Vec<Indexe
             "metadata",
         ]))
         .execute()
-        .await?
-        .try_collect::<Vec<_>>()
         .await?;
-    collect_indexed_source_summaries(&batches)
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source))
 }
 
 /// Loads lightweight metadata for a single indexed source path.
@@ -377,7 +383,7 @@ pub async fn load_indexed_source_summary(
         return Ok(None);
     };
 
-    let batches = table
+    let mut stream = table
         .query()
         .only_if(format!("source_path = {}", sql_string(source_path)))
         .select(Select::columns(&[
@@ -387,10 +393,13 @@ pub async fn load_indexed_source_summary(
             "metadata",
         ]))
         .execute()
-        .await?
-        .try_collect::<Vec<_>>()
         .await?;
-    Ok(collect_indexed_source_summaries(&batches)?
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source)
         .into_iter()
         .next())
 }
@@ -578,150 +587,164 @@ pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
 }
 
 /// Collects lightweight per-source metadata from stored chunk batches.
+#[cfg(test)]
 pub fn collect_indexed_source_summaries(
     batches: &[RecordBatch],
 ) -> Result<Vec<IndexedSourceSummary>> {
-    let mut sources: BTreeMap<String, IndexedSourceSummary> = BTreeMap::new();
-    let mut pages_by_source: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
-
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
     for batch in batches {
-        let source_col = batch
-            .column_by_name("source_path")
-            .context("source_path column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("source_path column type")?;
-        let page_col = batch
-            .column_by_name("page")
-            .context("page column missing")?
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .context("page column type")?;
-        let format_col = batch
-            .column_by_name("format")
-            .context("format column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("format column type")?;
-        let metadata_col = batch
-            .column_by_name("metadata")
-            .context("metadata column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("metadata column type")?;
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source))
+}
 
-        for i in 0..batch.num_rows() {
-            let source = source_col.value(i);
-            let absolute_path = serde_json::from_str::<serde_json::Value>(metadata_col.value(i))
-                .ok()
-                .and_then(|metadata| {
-                    metadata
-                        .get("source_absolute_path")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                });
-            let entry = sources
+fn accumulate_indexed_source_summaries(
+    sources: &mut BTreeMap<String, IndexedSourceSummary>,
+    pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
+    batch: &RecordBatch,
+) -> Result<()> {
+    let source_col = batch
+        .column_by_name("source_path")
+        .context("source_path column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("source_path column type")?;
+    let page_col = batch
+        .column_by_name("page")
+        .context("page column missing")?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .context("page column type")?;
+    let format_col = batch
+        .column_by_name("format")
+        .context("format column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("format column type")?;
+    let metadata_col = batch
+        .column_by_name("metadata")
+        .context("metadata column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("metadata column type")?;
+
+    for i in 0..batch.num_rows() {
+        let source = source_col.value(i);
+        let entry = sources
+            .entry(source.to_string())
+            .or_insert_with(|| IndexedSourceSummary {
+                source_path: source.to_string(),
+                format: format_col.value(i).to_string(),
+                ..Default::default()
+            });
+        if entry.source_absolute_path.is_none() {
+            entry.source_absolute_path = source_absolute_path_from_metadata(metadata_col.value(i));
+        }
+        entry.chunks += 1;
+
+        let page = page_col.value(i);
+        if page > 0 {
+            pages_by_source
                 .entry(source.to_string())
-                .or_insert_with(|| IndexedSourceSummary {
-                    source_path: source.to_string(),
-                    source_absolute_path: absolute_path,
-                    format: format_col.value(i).to_string(),
-                    ..Default::default()
-                });
-            if entry.source_absolute_path.is_none() {
-                entry.source_absolute_path =
-                    serde_json::from_str::<serde_json::Value>(metadata_col.value(i))
-                        .ok()
-                        .and_then(|metadata| {
-                            metadata
-                                .get("source_absolute_path")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_string)
-                        });
-            }
-            entry.chunks += 1;
-
-            let page = page_col.value(i);
-            if page > 0 {
-                pages_by_source
-                    .entry(source.to_string())
-                    .or_default()
-                    .insert(page);
-            }
+                .or_default()
+                .insert(page);
         }
     }
 
+    Ok(())
+}
+
+fn finalize_indexed_source_summaries(
+    mut sources: BTreeMap<String, IndexedSourceSummary>,
+    pages_by_source: BTreeMap<String, BTreeSet<i32>>,
+) -> Vec<IndexedSourceSummary> {
     for (source, pages) in pages_by_source {
         if let Some(entry) = sources.get_mut(&source) {
             entry.page_count = pages.len();
         }
     }
-
-    Ok(sources.into_values().collect())
+    sources.into_values().collect()
 }
 
 /// Collects per-source metadata from stored chunk batches.
+#[cfg(test)]
 pub fn collect_indexed_sources(batches: &[RecordBatch]) -> Result<Vec<IndexedSource>> {
-    let mut sources: BTreeMap<String, IndexedSource> = BTreeMap::new();
-    let mut pages_by_source: BTreeMap<String, BTreeSet<i32>> = BTreeMap::new();
-
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
     for batch in batches {
-        let text_col = batch
-            .column_by_name("chunk_text")
-            .context("chunk_text column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("chunk_text column type")?;
-        let source_col = batch
-            .column_by_name("source_path")
-            .context("source_path column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("source_path column type")?;
-        let page_col = batch
-            .column_by_name("page")
-            .context("page column missing")?
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .context("page column type")?;
-        let format_col = batch
-            .column_by_name("format")
-            .context("format column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("format column type")?;
+        accumulate_indexed_sources(&mut sources, &mut pages_by_source, batch)?;
+    }
+    Ok(finalize_indexed_sources(sources, pages_by_source))
+}
 
-        for i in 0..batch.num_rows() {
-            let source = source_col.value(i);
-            let text = text_col.value(i);
-            let entry = sources
+fn accumulate_indexed_sources(
+    sources: &mut BTreeMap<String, IndexedSource>,
+    pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
+    batch: &RecordBatch,
+) -> Result<()> {
+    let text_col = batch
+        .column_by_name("chunk_text")
+        .context("chunk_text column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("chunk_text column type")?;
+    let source_col = batch
+        .column_by_name("source_path")
+        .context("source_path column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("source_path column type")?;
+    let page_col = batch
+        .column_by_name("page")
+        .context("page column missing")?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .context("page column type")?;
+    let format_col = batch
+        .column_by_name("format")
+        .context("format column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("format column type")?;
+
+    for i in 0..batch.num_rows() {
+        let source = source_col.value(i);
+        let text = text_col.value(i);
+        let char_count = text.chars().count();
+        let entry = sources
+            .entry(source.to_string())
+            .or_insert_with(|| IndexedSource {
+                source_path: source.to_string(),
+                format: format_col.value(i).to_string(),
+                ..Default::default()
+            });
+        entry.chunks += 1;
+        entry.chars += char_count;
+        entry.estimated_tokens += estimate_token_count_from_chars(char_count);
+
+        let page = page_col.value(i);
+        if page > 0 {
+            pages_by_source
                 .entry(source.to_string())
-                .or_insert_with(|| IndexedSource {
-                    source_path: source.to_string(),
-                    format: format_col.value(i).to_string(),
-                    ..Default::default()
-                });
-            entry.chunks += 1;
-            entry.chars += text.chars().count();
-            entry.estimated_tokens += estimate_token_count(text);
-
-            let page = page_col.value(i);
-            if page > 0 {
-                pages_by_source
-                    .entry(source.to_string())
-                    .or_default()
-                    .insert(page);
-            }
+                .or_default()
+                .insert(page);
         }
     }
 
+    Ok(())
+}
+
+fn finalize_indexed_sources(
+    mut sources: BTreeMap<String, IndexedSource>,
+    pages_by_source: BTreeMap<String, BTreeSet<i32>>,
+) -> Vec<IndexedSource> {
     for (source, pages) in pages_by_source {
         if let Some(entry) = sources.get_mut(&source) {
             entry.page_count = pages.len();
         }
     }
-
-    Ok(sources.into_values().collect())
+    sources.into_values().collect()
 }
 
 /// Collects summary statistics from stored chunk batches.
@@ -860,8 +883,22 @@ fn sql_like_prefix(value: &str) -> String {
     format!("'{escaped}%'")
 }
 
+fn source_absolute_path_from_metadata(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("source_absolute_path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 fn estimate_token_count(text: &str) -> usize {
-    let chars = text.chars().count();
+    estimate_token_count_from_chars(text.chars().count())
+}
+
+fn estimate_token_count_from_chars(chars: usize) -> usize {
     chars.div_ceil(4)
 }
 
