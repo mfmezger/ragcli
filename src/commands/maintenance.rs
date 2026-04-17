@@ -1,6 +1,9 @@
 use crate::commands::stat::fmt_count;
 use crate::config::{ensure_store_layout, store_dir};
-use crate::store::{connect_db, delete_source_rows, list_indexed_sources, IndexedSource};
+use crate::store::{
+    clear_store_rows, connect_db, delete_source_rows, list_indexed_source_summaries,
+    load_indexed_source_summary, IndexedSourceSummary,
+};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::path::Path;
@@ -9,7 +12,7 @@ use std::path::Path;
 pub struct PruneReport {
     pub store: String,
     pub dry_run: bool,
-    pub stale_sources: Vec<IndexedSource>,
+    pub stale_sources: Vec<IndexedSourceSummary>,
     pub deleted_sources: usize,
     pub deleted_chunks: usize,
 }
@@ -18,21 +21,17 @@ pub async fn delete(name: Option<&str>, path: String) -> Result<()> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let db = connect_db(&store).await?;
-    let sources = list_indexed_sources(&db).await?;
-    let Some(source) = sources
-        .into_iter()
-        .find(|source| source.source_path == path)
-    else {
+    let Some(source) = load_indexed_source_summary(&db, &path).await? else {
         println!("No indexed source matched {}", path);
         return Ok(());
     };
 
     delete_source_rows(&db, std::slice::from_ref(&source.source_path)).await?;
     println!(
-        "Deleted {} [{} chunks, ~{} tokens]",
+        "Deleted {} [{}, {} chunks]",
         source.source_path,
-        fmt_count(source.chunks),
-        fmt_count(source.estimated_tokens)
+        source.format,
+        fmt_count(source.chunks)
     );
     Ok(())
 }
@@ -45,7 +44,7 @@ pub async fn clear(name: Option<&str>, yes: bool) -> Result<()> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let db = connect_db(&store).await?;
-    let sources = list_indexed_sources(&db).await?;
+    let sources = list_indexed_source_summaries(&db).await?;
     if sources.is_empty() {
         println!("Store already empty: {}", store.display());
         return Ok(());
@@ -53,11 +52,7 @@ pub async fn clear(name: Option<&str>, yes: bool) -> Result<()> {
 
     let deleted_sources = sources.len();
     let deleted_chunks = sources.iter().map(|source| source.chunks).sum::<usize>();
-    let paths = sources
-        .into_iter()
-        .map(|source| source.source_path)
-        .collect::<Vec<_>>();
-    delete_source_rows(&db, &paths).await?;
+    clear_store_rows(&db).await?;
 
     println!(
         "Cleared store {}: removed {} sources and {} chunks",
@@ -82,7 +77,7 @@ async fn build_prune_report(name: Option<&str>, apply: bool) -> Result<PruneRepo
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let db = connect_db(&store).await?;
-    let stale_sources = list_indexed_sources(&db)
+    let stale_sources = list_indexed_source_summaries(&db)
         .await?
         .into_iter()
         .filter(|source| !Path::new(&source.source_path).exists())
@@ -125,13 +120,14 @@ fn print_prune_human(report: &PruneReport) {
     }
 
     for source in &report.stale_sources {
-        println!(
-            "    - {}  [{}, {} chunks, ~{} tokens]",
-            source.source_path,
-            source.format,
-            fmt_count(source.chunks),
-            fmt_count(source.estimated_tokens)
-        );
+        let mut details = vec![
+            source.format.clone(),
+            format!("{} chunks", fmt_count(source.chunks)),
+        ];
+        if source.page_count > 0 {
+            details.push(format!("{} pages", fmt_count(source.page_count)));
+        }
+        println!("    - {}  [{}]", source.source_path, details.join(", "));
     }
 
     if report.dry_run {
@@ -149,7 +145,10 @@ fn print_prune_human(report: &PruneReport) {
 mod tests {
     use super::*;
     use crate::source_kind::SourceKind;
-    use crate::store::{connect_db, list_indexed_sources, replace_source_rows, ChunkRow};
+    use crate::store::{
+        connect_db, list_indexed_source_summaries, list_indexed_sources, replace_source_rows,
+        ChunkRow,
+    };
     use crate::test_support::with_test_env;
     use std::path::Path;
 
@@ -201,6 +200,31 @@ mod tests {
             let remaining = list_indexed_sources(&db).await.unwrap();
             assert_eq!(remaining.len(), 1);
             assert_eq!(remaining[0].source_path, "docs/b.md");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_clear_removes_all_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let store = store_dir(Some("clear-store")).unwrap();
+            ensure_store_layout(&store).unwrap();
+            let db = connect_db(&store).await.unwrap();
+            replace_source_rows(
+                &db,
+                &[
+                    sample_row("docs/a.md", "alpha"),
+                    sample_row("docs/b.md", "beta"),
+                ],
+                &["docs/a.md".to_string(), "docs/b.md".to_string()],
+            )
+            .await
+            .unwrap();
+
+            clear(Some("clear-store"), true).await.unwrap();
+
+            assert!(list_indexed_source_summaries(&db).await.unwrap().is_empty());
         })
         .await;
     }
