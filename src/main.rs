@@ -9,6 +9,7 @@ mod graph;
 mod ingest;
 mod jsonutil;
 mod models;
+mod query;
 mod retrieval;
 mod rewrite;
 mod source_kind;
