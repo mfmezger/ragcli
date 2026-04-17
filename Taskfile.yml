@@ -71,6 +71,26 @@ tasks:
     cmds:
       - cargo run -- stat {{.CLI_ARGS}}
 
+  sources:
+    desc: List indexed source paths
+    cmds:
+      - cargo run -- sources {{.CLI_ARGS}}
+
+  delete:
+    desc: Delete one indexed source path
+    cmds:
+      - cargo run -- delete {{.CLI_ARGS}}
+
+  clear:
+    desc: Clear all indexed content from the selected store
+    cmds:
+      - cargo run -- clear {{.CLI_ARGS}}
+
+  prune:
+    desc: Preview or remove stale indexed source paths
+    cmds:
+      - cargo run -- prune {{.CLI_ARGS}}
+
   index:
     desc: Index a file or directory
     cmds:

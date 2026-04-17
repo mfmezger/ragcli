@@ -85,6 +85,12 @@ pub async fn run(cli: Cli) -> Result<()> {
                     commands::config::set(name, key, value).await?
                 }
             },
+            Command::Sources { json } => commands::sources::run(name, json).await?,
+            Command::Delete { path } => commands::maintenance::delete(name, path).await?,
+            Command::Clear { yes } => commands::maintenance::clear(name, yes).await?,
+            Command::Prune { apply, json } => {
+                commands::maintenance::prune(name, apply, json).await?
+            }
             Command::Stat { json } => commands::stat::run(name, json).await?,
             Command::Doctor { json } => commands::doctor::run(name, json).await?,
         }

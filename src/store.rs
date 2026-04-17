@@ -100,6 +100,39 @@ pub struct SourceChunkStat {
     pub estimated_tokens: usize,
 }
 
+/// Per-source metadata used for store inspection commands.
+#[derive(Debug, Default, Serialize, Clone, PartialEq, Eq)]
+pub struct IndexedSource {
+    /// Source file path.
+    pub source_path: String,
+    /// Indexed format label such as `text`, `markdown`, `pdf`, or `image`.
+    pub format: String,
+    /// Number of chunks stored for this source.
+    pub chunks: usize,
+    /// Total characters stored for this source.
+    pub chars: usize,
+    /// Approximate token count for this source.
+    pub estimated_tokens: usize,
+    /// Number of unique pages represented for paginated sources.
+    pub page_count: usize,
+}
+
+/// Lightweight per-source metadata used for maintenance commands.
+#[derive(Debug, Default, Serialize, Clone, PartialEq, Eq)]
+pub struct IndexedSourceSummary {
+    /// Source file path.
+    pub source_path: String,
+    /// Canonical absolute source file path when recorded at index time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_absolute_path: Option<String>,
+    /// Indexed format label such as `text`, `markdown`, `pdf`, or `image`.
+    pub format: String,
+    /// Number of chunks stored for this source.
+    pub chunks: usize,
+    /// Number of unique pages represented for paginated sources.
+    pub page_count: usize,
+}
+
 /// Aggregate statistics for a store.
 #[derive(Debug, Default, Serialize)]
 pub struct StoreStats {
@@ -198,14 +231,20 @@ pub fn ensure_metadata(
     Ok(())
 }
 
+async fn open_table_if_exists(db: &Connection) -> Result<Option<Table>> {
+    match db.open_table(DEFAULT_TABLE_NAME).execute().await {
+        Ok(table) => Ok(Some(table)),
+        Err(LanceDbError::TableNotFound { .. }) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Loads stored per-source fingerprint data from chunk metadata.
 pub async fn load_source_fingerprints(
     db: &Connection,
 ) -> Result<BTreeMap<String, SourceFingerprint>> {
-    let table = match db.open_table(DEFAULT_TABLE_NAME).execute().await {
-        Ok(table) => table,
-        Err(LanceDbError::TableNotFound { .. }) => return Ok(BTreeMap::new()),
-        Err(err) => return Err(err.into()),
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(BTreeMap::new());
     };
     let mut stream = table
         .query()
@@ -253,11 +292,13 @@ pub async fn load_source_fingerprints(
                 .get("source_modified_unix_ms")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or_default();
-            fingerprints.entry(source.to_string()).or_insert_with(|| SourceFingerprint {
-                fingerprint: fingerprint.to_string(),
-                size_bytes,
-                modified_unix_ms,
-            });
+            fingerprints
+                .entry(source.to_string())
+                .or_insert_with(|| SourceFingerprint {
+                    fingerprint: fingerprint.to_string(),
+                    size_bytes,
+                    modified_unix_ms,
+                });
         }
     }
 
@@ -269,13 +310,10 @@ pub async fn replace_source_rows(
     rows: &[ChunkRow],
     source_paths: &[String],
 ) -> Result<()> {
-    let source_paths: BTreeSet<String> = source_paths.iter().cloned().collect();
     let table = open_or_create_table(db, rows).await?;
 
-    for source_path in source_paths {
-        table
-            .delete(&format!("source_path = {}", sql_string(&source_path)))
-            .await?;
+    if let Some(filter) = build_source_delete_filter(source_paths) {
+        table.delete(&filter).await?;
     }
 
     if !rows.is_empty() {
@@ -285,6 +323,111 @@ pub async fn replace_source_rows(
         table.add(Box::new(batches)).execute().await?;
     }
     ensure_fts_index(&table, true).await?;
+    Ok(())
+}
+
+/// Lists indexed sources together with aggregate per-source metadata.
+pub async fn list_indexed_sources(db: &Connection) -> Result<Vec<IndexedSource>> {
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut stream = table
+        .query()
+        .select(Select::columns(&[
+            "source_path",
+            "chunk_text",
+            "page",
+            "format",
+        ]))
+        .execute()
+        .await?;
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_sources(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_sources(sources, pages_by_source))
+}
+
+/// Lists lightweight indexed source metadata without scanning chunk text.
+pub async fn list_indexed_source_summaries(db: &Connection) -> Result<Vec<IndexedSourceSummary>> {
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut stream = table
+        .query()
+        .select(Select::columns(&[
+            "source_path",
+            "page",
+            "format",
+            "metadata",
+        ]))
+        .execute()
+        .await?;
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source))
+}
+
+/// Loads lightweight metadata for a single indexed source path.
+pub async fn load_indexed_source_summary(
+    db: &Connection,
+    source_path: &str,
+) -> Result<Option<IndexedSourceSummary>> {
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(None);
+    };
+
+    let mut stream = table
+        .query()
+        .only_if(format!("source_path = {}", sql_string(source_path)))
+        .select(Select::columns(&[
+            "source_path",
+            "page",
+            "format",
+            "metadata",
+        ]))
+        .execute()
+        .await?;
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    while let Some(batch) = stream.try_next().await? {
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, &batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source)
+        .into_iter()
+        .next())
+}
+
+/// Deletes all stored rows for the given source paths.
+pub async fn delete_source_rows(db: &Connection, source_paths: &[String]) -> Result<()> {
+    let Some(filter) = build_source_delete_filter(source_paths) else {
+        return Ok(());
+    };
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(());
+    };
+
+    table.delete(&filter).await?;
+    ensure_fts_index(&table, true).await?;
+
+    Ok(())
+}
+
+/// Deletes every stored row in the selected table.
+pub async fn clear_store_rows(db: &Connection) -> Result<()> {
+    let Some(table) = open_table_if_exists(db).await? else {
+        return Ok(());
+    };
+
+    table.delete("source_path IS NOT NULL").await?;
+    ensure_fts_index(&table, true).await?;
+
     Ok(())
 }
 
@@ -443,6 +586,167 @@ pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Collects lightweight per-source metadata from stored chunk batches.
+#[cfg(test)]
+pub fn collect_indexed_source_summaries(
+    batches: &[RecordBatch],
+) -> Result<Vec<IndexedSourceSummary>> {
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    for batch in batches {
+        accumulate_indexed_source_summaries(&mut sources, &mut pages_by_source, batch)?;
+    }
+    Ok(finalize_indexed_source_summaries(sources, pages_by_source))
+}
+
+fn accumulate_indexed_source_summaries(
+    sources: &mut BTreeMap<String, IndexedSourceSummary>,
+    pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
+    batch: &RecordBatch,
+) -> Result<()> {
+    let source_col = batch
+        .column_by_name("source_path")
+        .context("source_path column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("source_path column type")?;
+    let page_col = batch
+        .column_by_name("page")
+        .context("page column missing")?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .context("page column type")?;
+    let format_col = batch
+        .column_by_name("format")
+        .context("format column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("format column type")?;
+    let metadata_col = batch
+        .column_by_name("metadata")
+        .context("metadata column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("metadata column type")?;
+
+    for i in 0..batch.num_rows() {
+        let source = source_col.value(i);
+        let entry = sources
+            .entry(source.to_string())
+            .or_insert_with(|| IndexedSourceSummary {
+                source_path: source.to_string(),
+                format: format_col.value(i).to_string(),
+                ..Default::default()
+            });
+        if entry.source_absolute_path.is_none() {
+            entry.source_absolute_path = source_absolute_path_from_metadata(metadata_col.value(i));
+        }
+        entry.chunks += 1;
+
+        let page = page_col.value(i);
+        if page > 0 {
+            pages_by_source
+                .entry(source.to_string())
+                .or_default()
+                .insert(page);
+        }
+    }
+
+    Ok(())
+}
+
+fn finalize_indexed_source_summaries(
+    mut sources: BTreeMap<String, IndexedSourceSummary>,
+    pages_by_source: BTreeMap<String, BTreeSet<i32>>,
+) -> Vec<IndexedSourceSummary> {
+    for (source, pages) in pages_by_source {
+        if let Some(entry) = sources.get_mut(&source) {
+            entry.page_count = pages.len();
+        }
+    }
+    sources.into_values().collect()
+}
+
+/// Collects per-source metadata from stored chunk batches.
+#[cfg(test)]
+pub fn collect_indexed_sources(batches: &[RecordBatch]) -> Result<Vec<IndexedSource>> {
+    let mut sources = BTreeMap::new();
+    let mut pages_by_source = BTreeMap::new();
+    for batch in batches {
+        accumulate_indexed_sources(&mut sources, &mut pages_by_source, batch)?;
+    }
+    Ok(finalize_indexed_sources(sources, pages_by_source))
+}
+
+fn accumulate_indexed_sources(
+    sources: &mut BTreeMap<String, IndexedSource>,
+    pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
+    batch: &RecordBatch,
+) -> Result<()> {
+    let text_col = batch
+        .column_by_name("chunk_text")
+        .context("chunk_text column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("chunk_text column type")?;
+    let source_col = batch
+        .column_by_name("source_path")
+        .context("source_path column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("source_path column type")?;
+    let page_col = batch
+        .column_by_name("page")
+        .context("page column missing")?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .context("page column type")?;
+    let format_col = batch
+        .column_by_name("format")
+        .context("format column missing")?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("format column type")?;
+
+    for i in 0..batch.num_rows() {
+        let source = source_col.value(i);
+        let text = text_col.value(i);
+        let char_count = text.chars().count();
+        let entry = sources
+            .entry(source.to_string())
+            .or_insert_with(|| IndexedSource {
+                source_path: source.to_string(),
+                format: format_col.value(i).to_string(),
+                ..Default::default()
+            });
+        entry.chunks += 1;
+        entry.chars += char_count;
+        entry.estimated_tokens += estimate_token_count_from_chars(char_count);
+
+        let page = page_col.value(i);
+        if page > 0 {
+            pages_by_source
+                .entry(source.to_string())
+                .or_default()
+                .insert(page);
+        }
+    }
+
+    Ok(())
+}
+
+fn finalize_indexed_sources(
+    mut sources: BTreeMap<String, IndexedSource>,
+    pages_by_source: BTreeMap<String, BTreeSet<i32>>,
+) -> Vec<IndexedSource> {
+    for (source, pages) in pages_by_source {
+        if let Some(entry) = sources.get_mut(&source) {
+            entry.page_count = pages.len();
+        }
+    }
+    sources.into_values().collect()
+}
+
 /// Collects summary statistics from stored chunk batches.
 pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<StoreStats> {
     let mut stats = StoreStats::default();
@@ -547,6 +851,25 @@ pub fn strip_thinking(text: &str) -> String {
     text.to_string()
 }
 
+fn build_source_delete_filter(source_paths: &[String]) -> Option<String> {
+    let source_paths = source_paths.iter().cloned().collect::<BTreeSet<_>>();
+    match source_paths.len() {
+        0 => None,
+        1 => source_paths
+            .iter()
+            .next()
+            .map(|source_path| format!("source_path = {}", sql_string(source_path))),
+        _ => Some(format!(
+            "source_path IN ({})",
+            source_paths
+                .iter()
+                .map(|source_path| sql_string(source_path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -560,8 +883,22 @@ fn sql_like_prefix(value: &str) -> String {
     format!("'{escaped}%'")
 }
 
+fn source_absolute_path_from_metadata(raw: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|metadata| {
+            metadata
+                .get("source_absolute_path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
 fn estimate_token_count(text: &str) -> usize {
-    let chars = text.chars().count();
+    estimate_token_count_from_chars(text.chars().count())
+}
+
+fn estimate_token_count_from_chars(chars: usize) -> usize {
     chars.div_ceil(4)
 }
 
@@ -668,6 +1005,63 @@ mod tests {
         assert_eq!(contexts.len(), 2);
         assert!(contexts.iter().any(|ctx| ctx.contains("new")));
         assert!(!contexts.iter().any(|ctx| ctx.contains("old")));
+    }
+
+    #[test]
+    fn test_build_source_delete_filter_uses_in_clause_for_multiple_sources() {
+        let filter = build_source_delete_filter(&[
+            "b.txt".to_string(),
+            "a.txt".to_string(),
+            "a.txt".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(filter, "source_path IN ('a.txt', 'b.txt')");
+    }
+
+    #[tokio::test]
+    async fn test_delete_source_rows_removes_only_requested_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                sample_row("a.txt", "alpha", 1.0),
+                sample_row("b.txt", "beta", 2.0),
+            ],
+            &["a.txt".to_string(), "b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        delete_source_rows(&db, &["a.txt".to_string()])
+            .await
+            .unwrap();
+
+        let sources = list_indexed_sources(&db).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].source_path, "b.txt");
+    }
+
+    #[tokio::test]
+    async fn test_clear_store_rows_removes_every_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = connect_db(dir.path()).await.unwrap();
+
+        replace_source_rows(
+            &db,
+            &[
+                sample_row("a.txt", "alpha", 1.0),
+                sample_row("b.txt", "beta", 2.0),
+            ],
+            &["a.txt".to_string(), "b.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        clear_store_rows(&db).await.unwrap();
+
+        assert!(list_indexed_source_summaries(&db).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -852,6 +1246,49 @@ mod tests {
             filter,
             "source_path = 'docs/it''s.txt' AND source_path LIKE 'docs/\\_v1\\%/%' ESCAPE '\\' AND page = 3 AND format = 'markdown'"
         );
+    }
+
+    #[test]
+    fn test_collect_indexed_source_summaries_aggregates_metadata() {
+        let schema = build_schema(2);
+        let batch = build_record_batch(
+            schema,
+            &[
+                ChunkRow {
+                    metadata: r#"{"source_absolute_path":"/tmp/notes.md"}"#.to_string(),
+                    ..sample_row("notes.md", "hello world", 1.0)
+                },
+                ChunkRow {
+                    page: 1,
+                    ..sample_row("paper.pdf", "page one", 2.0)
+                },
+                ChunkRow {
+                    page: 2,
+                    ..sample_row("paper.pdf", "page two", 3.0)
+                },
+                sample_row("image.png", "caption text", 4.0),
+            ],
+        )
+        .unwrap();
+
+        let sources = collect_indexed_source_summaries(&[batch.clone()]).unwrap();
+
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[0].source_path, "image.png");
+        assert_eq!(sources[0].format, "image");
+        assert_eq!(sources[1].source_path, "notes.md");
+        assert_eq!(sources[1].chunks, 1);
+        assert_eq!(
+            sources[1].source_absolute_path.as_deref(),
+            Some("/tmp/notes.md")
+        );
+        assert_eq!(sources[2].source_path, "paper.pdf");
+        assert_eq!(sources[2].format, "pdf");
+        assert_eq!(sources[2].chunks, 2);
+        assert_eq!(sources[2].page_count, 2);
+
+        let detailed = collect_indexed_sources(&[batch]).unwrap();
+        assert_eq!(detailed[1].chars, "hello world".chars().count());
     }
 
     #[test]

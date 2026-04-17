@@ -18,6 +18,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 - compatibility checks for embedding model + chunk settings
 - `doctor` checks for store state, Ollama reachability, and installed models
 - `stat` summarizes indexed content, approximate embedded token volume, and store disk usage
+- `sources`/`ls`, `delete`, `clear`, and `prune` help inspect and maintain indexed content
 - query modes with inspectable retrieval output via `--mode`, `--show-plan`, `--show-scores`, `--show-citations`, and `--show-trace`
 
 ## Quick Start
@@ -78,6 +79,17 @@ Inspect what is already embedded:
 
 ```bash
 cargo run -- stat
+cargo run -- sources
+cargo run -- ls
+```
+
+Remove or clean indexed content:
+
+```bash
+cargo run -- delete ./notes/today.md
+cargo run -- prune
+cargo run -- prune --apply
+cargo run -- clear --yes
 ```
 
 ## Configuration
@@ -151,6 +163,10 @@ When upgrading across store schema changes, reindex into a fresh store or remove
 ## Behavior Notes
 
 - Re-indexing replaces existing rows for the same `source_path`.
+- `sources`/`ls` lists indexed paths with per-source format, chunk count, character count, token estimate, and page count when applicable.
+- `delete <path>` removes one indexed source path.
+- `prune` previews rows whose stored `source_path` no longer exists on disk; add `--apply` to remove them.
+- `clear` removes all indexed rows for the selected store and requires `--yes`.
 - Text and source files are decoded lossily, so non-UTF-8 files do not abort indexing.
 - Hidden files and directories are skipped during directory traversal unless `--include-hidden` is set.
 - `index --exclude <glob>` can be repeated to skip unwanted files or directories.
