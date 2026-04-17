@@ -1,7 +1,7 @@
 use crate::agent::{
     assess_evidence, build_query_plan, fallback_evidence_assessment, fallback_query_plan,
-    fallback_support_check, verify_answer_support, EvidenceAssessment, EvidenceVerdict,
-    RetrievalStrategy,
+    fallback_support_check, verify_answer_support, AgentIteration, EvidenceAssessment,
+    EvidenceVerdict, QueryPlan, RetrievalStrategy,
 };
 use crate::citation::labeled_contexts;
 use crate::cli::QueryModeArg;
@@ -14,7 +14,10 @@ use crate::store;
 use anyhow::Result;
 use std::collections::BTreeSet;
 
-use super::render::{print_citations, print_contexts, print_query_plan, print_query_trace, print_scores};
+use super::render::{
+    evidence_verdict_label, print_citations, print_contexts, print_query_plan,
+    print_query_trace, print_scores,
+};
 use super::retrieve::retrieve_candidates;
 use super::runtime::{mode_label, prepare_runtime};
 use super::types::{QueryExecutionPath, QueryResult, QueryRuntime};
@@ -125,7 +128,7 @@ async fn run_agentic_query_command(
             }
         };
         let notes = assessment_notes(&assessment);
-        iterations.push(crate::agent::AgentIteration {
+        iterations.push(AgentIteration {
             iteration,
             query_variants: active_queries.clone(),
             retrieved_count,
@@ -287,7 +290,7 @@ async fn generate_answer_from_hits(
 
 fn initial_agent_queries(
     question: &str,
-    plan: &crate::agent::QueryPlan,
+    plan: &QueryPlan,
     rewrite_set: &QueryRewriteSet,
 ) -> Vec<String> {
     match plan.strategy {
@@ -303,7 +306,7 @@ fn initial_agent_queries(
 
 fn refine_agent_queries(
     question: &str,
-    plan: &crate::agent::QueryPlan,
+    plan: &QueryPlan,
     rewrite_set: &QueryRewriteSet,
     assessment: &EvidenceAssessment,
 ) -> Vec<String> {
@@ -335,11 +338,7 @@ fn refine_agent_queries(
 fn assessment_notes(assessment: &EvidenceAssessment) -> Vec<String> {
     let mut notes = vec![format!(
         "evidence verdict={}",
-        match assessment.verdict {
-            EvidenceVerdict::Sufficient => "sufficient",
-            EvidenceVerdict::Partial => "partial",
-            EvidenceVerdict::Insufficient => "insufficient",
-        }
+        evidence_verdict_label(&assessment.verdict)
     )];
     if !assessment.missing_aspects.is_empty() {
         notes.push(format!(
@@ -365,6 +364,8 @@ mod tests {
     use super::*;
     use crate::commands::index;
     use crate::test_support::{sequential_json_server, with_test_env};
+
+    use super::super::runtime::retrieval_limit;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_run_answers_from_indexed_store_with_mock_ollama() {

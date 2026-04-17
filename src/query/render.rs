@@ -116,7 +116,7 @@ fn format_score(score: Option<f32>) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
-fn evidence_verdict_label(verdict: &EvidenceVerdict) -> &'static str {
+pub(crate) fn evidence_verdict_label(verdict: &EvidenceVerdict) -> &'static str {
     match verdict {
         EvidenceVerdict::Sufficient => "sufficient",
         EvidenceVerdict::Partial => "partial",
