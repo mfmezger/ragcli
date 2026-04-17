@@ -1,4 +1,4 @@
-use crate::config::{ensure_store_layout, load_or_create_config, store_dir, STORE_SUBDIRECTORIES};
+use crate::config::{ensure_store_layout, load_or_create_config, store_dir};
 use crate::store::{
     collect_store_stats, connect_db, load_metadata, StoreMetadata, StoreStats, DEFAULT_TABLE_NAME,
 };
@@ -143,6 +143,7 @@ fn print_human(report: &StatReport) {
     }
 }
 
+#[cfg(test)]
 pub fn dir_size_bytes(path: &Path) -> Result<u64> {
     if !path.exists() {
         return Ok(0);
@@ -255,6 +256,7 @@ pub fn fmt_count(value: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::STORE_SUBDIRECTORIES;
     use crate::test_support::with_test_env;
 
     #[test]
