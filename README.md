@@ -32,6 +32,7 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 ollama pull nomic-embed-text-v2-moe:latest
 ollama pull qwen3.5:4b
 
+cargo run -- --help
 cargo run -- doctor
 cargo run -- stat
 cargo run -- index ./docs
@@ -73,12 +74,14 @@ Check local setup:
 
 ```bash
 cargo run -- doctor
+cargo run -- doctor --json
 ```
 
 Inspect what is already embedded:
 
 ```bash
 cargo run -- stat
+cargo run -- stat --json
 cargo run -- sources
 cargo run -- ls
 ```
@@ -88,6 +91,7 @@ Remove or clean indexed content:
 ```bash
 cargo run -- delete ./notes/today.md
 cargo run -- prune
+cargo run -- prune --json
 cargo run -- prune --apply
 cargo run -- clear --yes
 ```
@@ -129,6 +133,7 @@ You can inspect and update config without editing TOML by hand:
 
 ```bash
 cargo run -- config show
+cargo run -- config show --json
 cargo run -- config set models.embed nomic-embed-text-v2-moe:latest
 cargo run -- config set ollama.base_url http://localhost:11434
 ```
@@ -190,7 +195,8 @@ Verify:
 
 ```bash
 cargo check
-cargo test
+cargo test --all-targets
+cargo fmt -- --check
 ```
 
 Coverage:
@@ -212,10 +218,17 @@ task coverage
 task coverage-html
 task coverage-lcov
 task changelog
+task changelog-preview
 task release -- patch
+task release-execute -- patch
 task fmt
 task doctor
 task stat
+task sources
+task delete -- ./notes/today.md
+task clear -- --yes
+task prune
+task prune -- --apply
 ```
 
 Task arguments can be forwarded to CLI tasks with `--`, for example:
