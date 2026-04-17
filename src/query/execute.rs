@@ -15,8 +15,8 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 
 use super::render::{
-    evidence_verdict_label, print_citations, print_contexts, print_query_plan,
-    print_query_trace, print_scores,
+    evidence_verdict_label, print_citations, print_contexts, print_query_plan, print_query_trace,
+    print_scores,
 };
 use super::retrieve::retrieve_candidates;
 use super::runtime::{mode_label, prepare_runtime};

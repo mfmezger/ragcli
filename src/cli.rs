@@ -125,6 +125,33 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Lists indexed source paths together with per-source metadata.
+    #[command(visible_alias = "ls")]
+    Sources {
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Removes a single indexed source path from the store.
+    Delete {
+        /// Indexed source path to remove.
+        path: String,
+    },
+    /// Removes all indexed content from the selected store.
+    Clear {
+        /// Confirms the destructive clear operation.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
+    /// Removes indexed sources whose files no longer exist on disk.
+    Prune {
+        /// Applies the prune instead of printing a preview.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Shows a summary of indexed content and store usage.
     Stat {
         /// Prints machine-readable JSON instead of the default text report.
@@ -239,6 +266,36 @@ mod tests {
                 assert!(force);
             }
             command => panic!("expected index command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn test_store_management_commands_parse() {
+        let sources = Cli::try_parse_from(["ragcli", "ls", "--json"]).unwrap();
+        match sources.command {
+            Command::Sources { json } => assert!(json),
+            command => panic!("expected sources command, got {command:?}"),
+        }
+
+        let delete = Cli::try_parse_from(["ragcli", "delete", "docs/a.md"]).unwrap();
+        match delete.command {
+            Command::Delete { path } => assert_eq!(path, "docs/a.md"),
+            command => panic!("expected delete command, got {command:?}"),
+        }
+
+        let clear = Cli::try_parse_from(["ragcli", "clear", "--yes"]).unwrap();
+        match clear.command {
+            Command::Clear { yes } => assert!(yes),
+            command => panic!("expected clear command, got {command:?}"),
+        }
+
+        let prune = Cli::try_parse_from(["ragcli", "prune", "--apply", "--json"]).unwrap();
+        match prune.command {
+            Command::Prune { apply, json } => {
+                assert!(apply);
+                assert!(json);
+            }
+            command => panic!("expected prune command, got {command:?}"),
         }
     }
 
