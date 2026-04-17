@@ -332,6 +332,7 @@ async fn embed_chunks(
     dim: &mut Option<usize>,
 ) -> Result<Vec<ChunkRow>> {
     let mut rows = Vec::new();
+    let source_absolute_path = canonical_source_path(path);
     for (idx, chunk) in chunks.into_iter().enumerate() {
         let embedding = embedder.embed(&chunk.text).await?;
         if dim.is_none() {
@@ -354,6 +355,12 @@ async fn embed_chunks(
                 "source_modified_unix_ms".to_string(),
                 json!(source_fingerprint.modified_unix_ms),
             );
+            if let Some(source_absolute_path) = &source_absolute_path {
+                obj.insert(
+                    "source_absolute_path".to_string(),
+                    json!(source_absolute_path),
+                );
+            }
         }
         let format = metadata
             .get("format")
@@ -373,6 +380,12 @@ async fn embed_chunks(
         });
     }
     Ok(rows)
+}
+
+fn canonical_source_path(path: &Path) -> Option<String> {
+    fs::canonicalize(path)
+        .ok()
+        .map(|path| path.display().to_string())
 }
 
 fn build_ingest_options(

@@ -4,9 +4,9 @@ use crate::store::{
     clear_store_rows, connect_db, delete_source_rows, list_indexed_source_summaries,
     load_indexed_source_summary, IndexedSourceSummary,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Serialize)]
 pub struct PruneReport {
@@ -77,11 +77,12 @@ async fn build_prune_report(name: Option<&str>, apply: bool) -> Result<PruneRepo
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let db = connect_db(&store).await?;
-    let stale_sources = list_indexed_source_summaries(&db)
-        .await?
-        .into_iter()
-        .filter(|source| !Path::new(&source.source_path).exists())
-        .collect::<Vec<_>>();
+    let mut stale_sources = Vec::new();
+    for source in list_indexed_source_summaries(&db).await? {
+        if source_is_missing(&source)? {
+            stale_sources.push(source);
+        }
+    }
     let deleted_sources = stale_sources.len();
     let deleted_chunks = stale_sources
         .iter()
@@ -103,6 +104,29 @@ async fn build_prune_report(name: Option<&str>, apply: bool) -> Result<PruneRepo
         deleted_sources: if apply { deleted_sources } else { 0 },
         deleted_chunks: if apply { deleted_chunks } else { 0 },
     })
+}
+
+fn source_prune_path(source: &IndexedSourceSummary) -> Result<PathBuf> {
+    if let Some(path) = &source.source_absolute_path {
+        return Ok(PathBuf::from(path));
+    }
+
+    let path = PathBuf::from(&source.source_path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        bail!(
+            "cannot safely prune relative source path {}; reindex it with a newer ragcli before pruning",
+            source.source_path
+        )
+    }
+}
+
+fn source_is_missing(source: &IndexedSourceSummary) -> Result<bool> {
+    let path = source_prune_path(source)?;
+    Ok(!path
+        .try_exists()
+        .with_context(|| format!("check whether source exists: {}", path.display()))?)
 }
 
 fn print_prune_human(report: &PruneReport) {
@@ -153,6 +177,10 @@ mod tests {
     use std::path::Path;
 
     fn sample_row(source_path: &str, text: &str) -> ChunkRow {
+        sample_row_with_metadata(source_path, text, "{}")
+    }
+
+    fn sample_row_with_metadata(source_path: &str, text: &str, metadata: &str) -> ChunkRow {
         ChunkRow {
             id: format!("{}-{}", source_path, text),
             source_path: source_path.to_string(),
@@ -164,7 +192,7 @@ mod tests {
                 .to_string(),
             page: 0,
             chunk_index: 0,
-            metadata: "{}".to_string(),
+            metadata: metadata.to_string(),
             embedding: vec![0.1, 0.2],
         }
     }
@@ -225,6 +253,57 @@ mod tests {
             clear(Some("clear-store"), true).await.unwrap();
 
             assert!(list_indexed_source_summaries(&db).await.unwrap().is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_prune_report_rejects_relative_sources_without_absolute_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let store = store_dir(Some("prune-relative")).unwrap();
+            ensure_store_layout(&store).unwrap();
+            let db = connect_db(&store).await.unwrap();
+            replace_source_rows(
+                &db,
+                &[sample_row("docs/a.md", "alpha")],
+                &["docs/a.md".to_string()],
+            )
+            .await
+            .unwrap();
+
+            let err = build_prune_report(Some("prune-relative"), false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("cannot safely prune relative source path docs/a.md"));
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_prune_report_uses_absolute_metadata_for_relative_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let live_path = dir.path().join("docs").join("a.md");
+            std::fs::create_dir_all(live_path.parent().unwrap()).unwrap();
+            std::fs::write(&live_path, "live").unwrap();
+            let store = store_dir(Some("prune-absolute")).unwrap();
+            ensure_store_layout(&store).unwrap();
+            let db = connect_db(&store).await.unwrap();
+            let metadata = format!(r#"{{"source_absolute_path":"{}"}}"#, live_path.display());
+            replace_source_rows(
+                &db,
+                &[sample_row_with_metadata("docs/a.md", "alpha", &metadata)],
+                &["docs/a.md".to_string()],
+            )
+            .await
+            .unwrap();
+
+            let report = build_prune_report(Some("prune-absolute"), false)
+                .await
+                .unwrap();
+            assert!(report.stale_sources.is_empty());
         })
         .await;
     }

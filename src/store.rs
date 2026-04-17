@@ -122,6 +122,9 @@ pub struct IndexedSource {
 pub struct IndexedSourceSummary {
     /// Source file path.
     pub source_path: String,
+    /// Canonical absolute source file path when recorded at index time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_absolute_path: Option<String>,
     /// Indexed format label such as `text`, `markdown`, `pdf`, or `image`.
     pub format: String,
     /// Number of chunks stored for this source.
@@ -352,7 +355,12 @@ pub async fn list_indexed_source_summaries(db: &Connection) -> Result<Vec<Indexe
 
     let batches = table
         .query()
-        .select(Select::columns(&["source_path", "page", "format"]))
+        .select(Select::columns(&[
+            "source_path",
+            "page",
+            "format",
+            "metadata",
+        ]))
         .execute()
         .await?
         .try_collect::<Vec<_>>()
@@ -372,7 +380,12 @@ pub async fn load_indexed_source_summary(
     let batches = table
         .query()
         .only_if(format!("source_path = {}", sql_string(source_path)))
-        .select(Select::columns(&["source_path", "page", "format"]))
+        .select(Select::columns(&[
+            "source_path",
+            "page",
+            "format",
+            "metadata",
+        ]))
         .execute()
         .await?
         .try_collect::<Vec<_>>()
@@ -590,16 +603,42 @@ pub fn collect_indexed_source_summaries(
             .as_any()
             .downcast_ref::<StringArray>()
             .context("format column type")?;
+        let metadata_col = batch
+            .column_by_name("metadata")
+            .context("metadata column missing")?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .context("metadata column type")?;
 
         for i in 0..batch.num_rows() {
             let source = source_col.value(i);
+            let absolute_path = serde_json::from_str::<serde_json::Value>(metadata_col.value(i))
+                .ok()
+                .and_then(|metadata| {
+                    metadata
+                        .get("source_absolute_path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
             let entry = sources
                 .entry(source.to_string())
                 .or_insert_with(|| IndexedSourceSummary {
                     source_path: source.to_string(),
+                    source_absolute_path: absolute_path,
                     format: format_col.value(i).to_string(),
                     ..Default::default()
                 });
+            if entry.source_absolute_path.is_none() {
+                entry.source_absolute_path =
+                    serde_json::from_str::<serde_json::Value>(metadata_col.value(i))
+                        .ok()
+                        .and_then(|metadata| {
+                            metadata
+                                .get("source_absolute_path")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string)
+                        });
+            }
             entry.chunks += 1;
 
             let page = page_col.value(i);
@@ -1178,7 +1217,10 @@ mod tests {
         let batch = build_record_batch(
             schema,
             &[
-                sample_row("notes.md", "hello world", 1.0),
+                ChunkRow {
+                    metadata: r#"{"source_absolute_path":"/tmp/notes.md"}"#.to_string(),
+                    ..sample_row("notes.md", "hello world", 1.0)
+                },
                 ChunkRow {
                     page: 1,
                     ..sample_row("paper.pdf", "page one", 2.0)
@@ -1199,6 +1241,10 @@ mod tests {
         assert_eq!(sources[0].format, "image");
         assert_eq!(sources[1].source_path, "notes.md");
         assert_eq!(sources[1].chunks, 1);
+        assert_eq!(
+            sources[1].source_absolute_path.as_deref(),
+            Some("/tmp/notes.md")
+        );
         assert_eq!(sources[2].source_path, "paper.pdf");
         assert_eq!(sources[2].format, "pdf");
         assert_eq!(sources[2].chunks, 2);
