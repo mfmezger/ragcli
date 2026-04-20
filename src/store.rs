@@ -560,6 +560,7 @@ pub fn build_retrieval_filter(
 }
 
 /// Extracts retrieval contexts from query result batches.
+#[cfg(test)]
 pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for batch in batches {
