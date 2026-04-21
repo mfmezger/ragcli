@@ -39,6 +39,21 @@ cargo run -- index ./docs
 cargo run -- query "What is this project about?"
 ```
 
+To install the CLI locally so you can run `ragcli` from other folders:
+
+```bash
+cargo install --path .
+ragcli --help
+```
+
+If you rebuild often during development, reinstall the current checkout with:
+
+```bash
+cargo install --path . --force
+```
+
+If `ragcli` is not found after installation, make sure `~/.cargo/bin` is on your `PATH`.
+
 ## Commands
 
 Index a directory or file:
