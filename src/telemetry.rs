@@ -118,19 +118,22 @@ pub fn init() -> Result<TelemetryGuard> {
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt_layer)
-            .init();
+            .try_init()
+            .context("initialize tracing subscriber")?;
         return Ok(TelemetryGuard::disabled());
     }
 
     let tracer_provider = build_tracer_provider(&config)?;
     let tracer = tracer_provider.tracer(DEFAULT_SERVICE_NAME.to_string());
-    global::set_tracer_provider(tracer_provider.clone());
 
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)
         .with(OpenTelemetryLayer::new(tracer))
-        .init();
+        .try_init()
+        .context("initialize tracing subscriber")?;
+
+    global::set_tracer_provider(tracer_provider.clone());
 
     Ok(TelemetryGuard {
         tracer_provider: Some(tracer_provider),
