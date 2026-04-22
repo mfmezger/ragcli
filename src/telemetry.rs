@@ -64,6 +64,9 @@ impl TelemetryConfig {
             endpoint,
             protocol,
             timeout_ms,
+            // Header values are consumed directly by opentelemetry-otlp from the
+            // standard OTEL env vars. We only retain a redaction-safe boolean here
+            // for future diagnostics output.
             headers_configured: read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_HEADERS).is_some(),
         })
     }
@@ -199,11 +202,14 @@ fn read_non_empty_env(name: &str) -> Option<String> {
 }
 
 fn normalize_http_traces_endpoint(endpoint: &str) -> String {
-    if endpoint.ends_with(HTTP_TRACES_PATH) {
-        endpoint.to_string()
-    } else {
-        format!("{}{HTTP_TRACES_PATH}", endpoint.trim_end_matches('/'))
+    if let Ok(url) = reqwest::Url::parse(endpoint) {
+        let path = url.path();
+        if path.is_empty() || path == "/" {
+            return format!("{}{HTTP_TRACES_PATH}", endpoint.trim_end_matches('/'));
+        }
     }
+
+    endpoint.to_string()
 }
 
 #[cfg(test)]
@@ -284,6 +290,23 @@ mod tests {
         assert_eq!(
             config.resolved_export_endpoint().as_deref(),
             Some("http://localhost:6006/v1/traces")
+        );
+    }
+
+    #[test]
+    fn test_http_endpoint_keeps_custom_path() {
+        let config = TelemetryConfig {
+            enabled: true,
+            service_name: DEFAULT_SERVICE_NAME.to_string(),
+            endpoint: Some("http://localhost:6006/ingest".to_string()),
+            protocol: OtlpProtocol::HttpProtobuf,
+            timeout_ms: None,
+            headers_configured: false,
+        };
+
+        assert_eq!(
+            config.resolved_export_endpoint().as_deref(),
+            Some("http://localhost:6006/ingest")
         );
     }
 

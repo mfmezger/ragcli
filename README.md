@@ -203,7 +203,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006
 ragcli query "What is this project about?"
 ```
 
-For `http/protobuf`, `ragcli` sends traces to the OTLP traces endpoint by appending `/v1/traces` when needed.
+For `http/protobuf`, `ragcli` appends `/v1/traces` only when the configured endpoint has no path (for example `http://localhost:4318`). If you provide a custom path such as `http://localhost:6006/ingest`, that path is used as-is.
 
 ## Storage
 
