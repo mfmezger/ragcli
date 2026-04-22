@@ -23,17 +23,25 @@ use clap::Parser;
 use cli::Cli;
 
 fn main() -> Result<()> {
-    let mut telemetry = telemetry::init()?;
     let cli = Cli::parse();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(app::run(cli));
-    drop(runtime);
 
-    if let Err(err) = telemetry.shutdown() {
+    let mut telemetry = {
+        let _guard = runtime.enter();
+        telemetry::init()?
+    };
+
+    let result = runtime.block_on(app::run(cli));
+
+    if let Err(err) = {
+        let _guard = runtime.enter();
+        telemetry.shutdown()
+    } {
         eprintln!("telemetry shutdown error: {err}");
     }
 
+    drop(runtime);
     result
 }

@@ -94,7 +94,7 @@ impl TelemetryGuard {
         if let Some(provider) = self.tracer_provider.take() {
             provider
                 .shutdown()
-                .map_err(|err| anyhow!(err.to_string()))
+                .map_err(|err| anyhow!(err))
                 .context("shutdown OTLP tracer provider")?;
         }
         Ok(())
@@ -153,7 +153,11 @@ fn build_tracer_provider(config: &TelemetryConfig) -> Result<SdkTracerProvider> 
     let exporter = match config.protocol {
         OtlpProtocol::HttpProtobuf => SpanExporter::builder()
             .with_http()
-            .with_http_client(Client::new())
+            .with_http_client(
+                Client::builder()
+                    .build()
+                    .context("create OTLP HTTP client")?,
+            )
             .with_protocol(Protocol::HttpBinary)
             .with_endpoint(endpoint)
             .with_timeout(timeout_or_default(config.timeout_ms))
