@@ -20,7 +20,7 @@ mod test_support;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::Cli;
+use cli::{Cli, Command};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -30,7 +30,14 @@ fn main() -> Result<()> {
 
     let mut telemetry = {
         let _guard = runtime.enter();
-        telemetry::init()?
+        match telemetry::init() {
+            Ok(telemetry) => telemetry,
+            Err(err) if matches!(cli.command, Command::Doctor { .. }) => {
+                eprintln!("telemetry init error: {err}");
+                telemetry::TelemetryGuard::disabled()
+            }
+            Err(err) => return Err(err),
+        }
     };
 
     let result = runtime.block_on(app::run(cli));

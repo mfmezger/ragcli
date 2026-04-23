@@ -54,6 +54,31 @@ pub struct TelemetryStatus {
     pub headers_configured: bool,
 }
 
+impl TelemetryStatus {
+    pub fn from_env_lossy() -> Self {
+        let protocol = match read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_PROTOCOL).as_deref() {
+            Some("grpc") => OtlpProtocol::Grpc,
+            _ => OtlpProtocol::HttpProtobuf,
+        };
+        let endpoint =
+            read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_ENDPOINT).map(|endpoint| match protocol {
+                OtlpProtocol::HttpProtobuf => normalize_http_traces_endpoint(&endpoint),
+                OtlpProtocol::Grpc => endpoint,
+            });
+
+        Self {
+            enabled: endpoint.is_some(),
+            service_name: read_non_empty_env(ENV_OTEL_SERVICE_NAME)
+                .unwrap_or_else(|| DEFAULT_SERVICE_NAME.to_string()),
+            endpoint,
+            protocol: protocol.as_str(),
+            timeout_ms: read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_TIMEOUT)
+                .and_then(|value| value.parse().ok()),
+            headers_configured: read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_HEADERS).is_some(),
+        }
+    }
+}
+
 impl TelemetryConfig {
     pub fn from_env() -> Result<Self> {
         let endpoint = read_non_empty_env(ENV_OTEL_EXPORTER_OTLP_ENDPOINT);

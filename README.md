@@ -212,7 +212,7 @@ ragcli doctor
 ragcli doctor --json
 ```
 
-`doctor` reports whether telemetry is enabled, the resolved service name, protocol, endpoint, timeout, and whether OTLP headers are configured. Header values are never printed.
+`doctor` reports whether telemetry is enabled, the resolved service name, protocol, endpoint, timeout, whether OTLP headers are configured, and any telemetry configuration parse error. Header values are never printed.
 
 By default, exported spans include operational metadata such as command names, query/index execution details, model names, endpoint hosts, durations, and request/response sizes. They do **not** include prompt bodies, retrieved source content, image bytes, or OTLP header values.
 

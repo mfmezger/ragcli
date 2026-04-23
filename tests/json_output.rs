@@ -97,6 +97,37 @@ fn test_doctor_json_reports_telemetry_configuration() {
     );
     assert_eq!(report["telemetry"]["timeout_ms"], 2500);
     assert_eq!(report["telemetry"]["headers_configured"], true);
+    assert_eq!(report["telemetry_error"], Value::Null);
+}
+
+#[test]
+fn test_doctor_json_reports_invalid_telemetry_configuration_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ragcli"))
+        .args(["doctor", "--json"])
+        .env("XDG_CONFIG_HOME", dir.path())
+        .env("OTEL_SERVICE_NAME", "ragcli-test")
+        .env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:6006")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(report["telemetry"]["enabled"], true);
+    assert_eq!(report["telemetry"]["service_name"], "ragcli-test");
+    assert_eq!(report["telemetry"]["protocol"], "http/protobuf");
+    assert_eq!(
+        report["telemetry"]["endpoint"],
+        "http://localhost:6006/v1/traces"
+    );
+    assert!(report["telemetry_error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported OTEL_EXPORTER_OTLP_PROTOCOL value"));
 }
 
 #[test]
