@@ -110,3 +110,8 @@ tasks:
     desc: Set a config key and value
     cmds:
       - cargo run -- config set {{.CLI_ARGS}}
+
+  live-smoke:
+    desc: Run the ignored live Ollama smoke test (requires RAGCLI_LIVE_E2E=1 and a running Ollama)
+    cmds:
+      - RAGCLI_LIVE_E2E=1 cargo test --test live_ollama_smoke -- --ignored {{.CLI_ARGS}}
