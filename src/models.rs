@@ -135,7 +135,7 @@ impl Embedder {
             operation = "embed",
             model = %self.model,
             endpoint_host = %endpoint_host(&self.base_url),
-            input_chars = text.chars().count(),
+            input_bytes = text.len(),
             success = field::Empty,
             embedding_dim = field::Empty,
             duration_ms = field::Empty,
@@ -225,11 +225,11 @@ impl Generator {
             operation = "chat",
             model = %self.model,
             endpoint_host = %endpoint_host(&self.base_url),
-            system_prompt_chars = system_prompt.chars().count(),
-            user_prompt_chars = user_prompt.chars().count(),
+            system_prompt_bytes = system_prompt.len(),
+            user_prompt_bytes = user_prompt.len(),
             max_tokens,
             success = field::Empty,
-            response_chars = field::Empty,
+            response_bytes = field::Empty,
             duration_ms = field::Empty,
         );
         let started = Instant::now();
@@ -272,7 +272,7 @@ impl Generator {
         span.record("success", result.is_ok());
         span.record("duration_ms", started.elapsed().as_millis() as u64);
         if let Ok(content) = &result {
-            span.record("response_chars", content.chars().count());
+            span.record("response_bytes", content.len());
         }
         result
     }
@@ -299,7 +299,7 @@ impl VisionCaptioner {
             image_path = %image_path.display(),
             image_bytes = field::Empty,
             success = field::Empty,
-            response_chars = field::Empty,
+            response_bytes = field::Empty,
             duration_ms = field::Empty,
         );
         let started = Instant::now();
@@ -344,7 +344,7 @@ impl VisionCaptioner {
         span.record("success", result.is_ok());
         span.record("duration_ms", started.elapsed().as_millis() as u64);
         if let Ok(content) = &result {
-            span.record("response_chars", content.chars().count());
+            span.record("response_bytes", content.len());
         }
         result
     }
