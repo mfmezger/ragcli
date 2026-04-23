@@ -205,6 +205,17 @@ ragcli query "What is this project about?"
 
 For `http/protobuf`, `ragcli` appends `/v1/traces` only when the configured endpoint has no path (for example `http://localhost:4318`). If you provide a custom path such as `http://localhost:6006/ingest`, that path is used as-is.
 
+You can inspect the resolved telemetry settings with:
+
+```bash
+ragcli doctor
+ragcli doctor --json
+```
+
+`doctor` reports whether telemetry is enabled, the resolved service name, protocol, endpoint, timeout, and whether OTLP headers are configured. Header values are never printed.
+
+By default, exported spans include operational metadata such as command names, query/index execution details, model names, endpoint hosts, durations, and request/response sizes. They do **not** include prompt bodies, retrieved source content, image bytes, or OTLP header values.
+
 ## Storage
 
 Each store lives under:

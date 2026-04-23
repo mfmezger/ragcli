@@ -19,10 +19,19 @@ pub const ENV_OTEL_EXPORTER_OTLP_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
 pub const ENV_OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
 pub const ENV_OTEL_EXPORTER_OTLP_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TIMEOUT";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub enum OtlpProtocol {
     HttpProtobuf,
     Grpc,
+}
+
+impl OtlpProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HttpProtobuf => "http/protobuf",
+            Self::Grpc => "grpc",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +40,16 @@ pub struct TelemetryConfig {
     pub service_name: String,
     pub endpoint: Option<String>,
     pub protocol: OtlpProtocol,
+    pub timeout_ms: Option<u64>,
+    pub headers_configured: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct TelemetryStatus {
+    pub enabled: bool,
+    pub service_name: String,
+    pub endpoint: Option<String>,
+    pub protocol: &'static str,
     pub timeout_ms: Option<u64>,
     pub headers_configured: bool,
 }
@@ -77,6 +96,17 @@ impl TelemetryConfig {
             OtlpProtocol::HttpProtobuf => normalize_http_traces_endpoint(endpoint),
             OtlpProtocol::Grpc => endpoint.to_string(),
         })
+    }
+
+    pub fn status(&self) -> TelemetryStatus {
+        TelemetryStatus {
+            enabled: self.enabled,
+            service_name: self.service_name.clone(),
+            endpoint: self.resolved_export_endpoint(),
+            protocol: self.protocol.as_str(),
+            timeout_ms: self.timeout_ms,
+            headers_configured: self.headers_configured,
+        }
     }
 }
 
