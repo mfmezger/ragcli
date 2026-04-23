@@ -163,6 +163,48 @@ Supported indexable formats currently include:
 - PDF: `.pdf`
 - images: `.png`, `.jpg`, `.jpeg`, `.webp`
 
+## Telemetry
+
+`ragcli` can optionally export tracing spans over OTLP while keeping the normal stderr log output.
+
+OTLP export is disabled unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+
+Currently supported protocols:
+
+- `http/protobuf` (default when `OTEL_EXPORTER_OTLP_PROTOCOL` is unset)
+- `grpc`
+
+Common environment variables:
+
+```bash
+export OTEL_SERVICE_NAME=ragcli
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_TIMEOUT=10000
+# optional
+export OTEL_EXPORTER_OTLP_HEADERS="api_key=..."
+```
+
+Collector example:
+
+```bash
+export OTEL_SERVICE_NAME=ragcli
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+ragcli doctor
+```
+
+Phoenix local example:
+
+```bash
+export OTEL_SERVICE_NAME=ragcli
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006
+ragcli query "What is this project about?"
+```
+
+For `http/protobuf`, `ragcli` appends `/v1/traces` only when the configured endpoint has no path (for example `http://localhost:4318`). If you provide a custom path such as `http://localhost:6006/ingest`, that path is used as-is.
+
 ## Storage
 
 Each store lives under:
