@@ -56,14 +56,14 @@ This checklist tracks the planned work to add optional OpenTelemetry trace expor
 
 ## Milestone 3: Doctor, docs, and validation
 
-- [ ] Extend `doctor` to report telemetry configuration
-- [ ] Redact secrets when reporting OTLP headers/auth presence
-- [ ] Add README documentation for OTLP export
-- [ ] Add a Phoenix example
-- [ ] Add a generic Collector example
-- [ ] Document privacy considerations and what is/is not exported by default
-- [ ] Add unit tests for telemetry config parsing and disabled/enabled paths
-- [ ] Add smoke/integration coverage for OTLP-enabled startup
+- [x] Extend `doctor` to report telemetry configuration
+- [x] Redact secrets when reporting OTLP headers/auth presence
+- [x] Add README documentation for OTLP export
+- [x] Add a Phoenix example
+- [x] Add a generic Collector example
+- [x] Document privacy considerations and what is/is not exported by default
+- [x] Add unit tests for telemetry config parsing and disabled/enabled paths
+- [x] Add smoke/integration coverage for OTLP-enabled startup
 - [ ] Optionally add a collector-backed integration test later
 
 ## Open questions

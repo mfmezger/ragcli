@@ -3,6 +3,7 @@ use crate::config::{
 };
 use crate::models::OllamaClient;
 use crate::store;
+use crate::telemetry::{TelemetryConfig, TelemetryStatus};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs;
@@ -43,6 +44,8 @@ pub struct DoctorReport {
     pub ollama_reachable: bool,
     pub ollama_error: Option<String>,
     pub installed_models: Option<ModelInstallReport>,
+    pub telemetry: TelemetryStatus,
+    pub telemetry_error: Option<String>,
     pub metadata: PathStatusReport,
     pub metadata_summary: Option<String>,
     pub metadata_error: Option<String>,
@@ -63,6 +66,10 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
     let store = store_dir(name)?;
     ensure_store_layout(&store)?;
     let cfg = load_or_create_config(&store)?;
+    let (telemetry, telemetry_error) = match TelemetryConfig::from_env() {
+        Ok(config) => (config.status(), None),
+        Err(err) => (TelemetryStatus::from_env_lossy(), Some(err.to_string())),
+    };
     let base = config::base_dir()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -126,6 +133,8 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
         ollama_reachable,
         ollama_error,
         installed_models,
+        telemetry,
+        telemetry_error,
         metadata: PathStatusReport {
             path: metadata_path.display().to_string(),
             status: status(metadata_path.exists()),
@@ -170,6 +179,26 @@ fn print_human(report: &DoctorReport) {
         eprintln!("  ollama: unreachable ({})", err);
     }
 
+    println!("  telemetry enabled: {}", status(report.telemetry.enabled));
+    println!(
+        "  telemetry service name: {}",
+        report.telemetry.service_name
+    );
+    println!("  telemetry protocol: {}", report.telemetry.protocol);
+    if let Some(endpoint) = &report.telemetry.endpoint {
+        println!("  telemetry endpoint: {}", endpoint);
+    }
+    if let Some(timeout_ms) = report.telemetry.timeout_ms {
+        println!("  telemetry timeout ms: {}", timeout_ms);
+    }
+    println!(
+        "  telemetry headers configured: {}",
+        status(report.telemetry.headers_configured)
+    );
+    if let Some(err) = &report.telemetry_error {
+        eprintln!("  telemetry config error: {}", err);
+    }
+
     println!(
         "  metadata: {} ({})",
         report.metadata.path, report.metadata.status
@@ -203,6 +232,38 @@ fn format_unix_timestamp(timestamp: u64) -> String {
 mod tests {
     use super::*;
     use crate::test_support::{sequential_json_server, with_test_env};
+    use std::env;
+
+    struct ScopedEnvVars {
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ScopedEnvVars {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let previous = vars
+                .iter()
+                .map(|(name, _)| (*name, env::var_os(name)))
+                .collect();
+
+            unsafe {
+                for (name, value) in vars {
+                    env::set_var(name, value);
+                }
+            }
+
+            Self { previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVars {
+        fn drop(&mut self) {
+            unsafe {
+                for (name, value) in self.previous.drain(..).rev() {
+                    restore_var(name, value);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_format_unix_timestamp_uses_rfc3339_when_possible() {
@@ -218,6 +279,7 @@ mod tests {
             assert!(serde_json::to_string(&report)
                 .unwrap()
                 .contains("\"ollama_reachable\""));
+            assert!(!report.telemetry.enabled);
         })
         .await;
     }
@@ -252,5 +314,101 @@ mod tests {
             assert!(report.metadata_error.is_some());
         })
         .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_report_includes_telemetry_env_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let _vars = ScopedEnvVars::set(&[
+                (
+                    crate::telemetry::ENV_OTEL_EXPORTER_OTLP_ENDPOINT,
+                    "http://localhost:6006",
+                ),
+                (
+                    crate::telemetry::ENV_OTEL_EXPORTER_OTLP_PROTOCOL,
+                    "http/protobuf",
+                ),
+                (crate::telemetry::ENV_OTEL_SERVICE_NAME, "ragcli-test"),
+                (
+                    crate::telemetry::ENV_OTEL_EXPORTER_OTLP_HEADERS,
+                    "api_key=secret",
+                ),
+                (crate::telemetry::ENV_OTEL_EXPORTER_OTLP_TIMEOUT, "2500"),
+            ]);
+
+            let report = build_report(Some("telemetry")).await.unwrap();
+            assert!(report.telemetry.enabled);
+            assert_eq!(report.telemetry.service_name, "ragcli-test");
+            assert_eq!(report.telemetry.protocol, "http/protobuf");
+            assert_eq!(
+                report.telemetry.endpoint.as_deref(),
+                Some("http://localhost:6006/v1/traces")
+            );
+            assert_eq!(report.telemetry.timeout_ms, Some(2500));
+            assert!(report.telemetry.headers_configured);
+            assert!(report.telemetry_error.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_build_report_keeps_running_when_telemetry_env_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        with_test_env(dir.path(), None, || async {
+            let _vars = ScopedEnvVars::set(&[
+                (
+                    crate::telemetry::ENV_OTEL_EXPORTER_OTLP_ENDPOINT,
+                    "http://localhost:6006",
+                ),
+                (
+                    crate::telemetry::ENV_OTEL_EXPORTER_OTLP_PROTOCOL,
+                    "http/json",
+                ),
+                (crate::telemetry::ENV_OTEL_SERVICE_NAME, "ragcli-test"),
+            ]);
+
+            let report = build_report(Some("telemetry-invalid")).await.unwrap();
+            assert!(report.telemetry.enabled);
+            assert_eq!(report.telemetry.service_name, "ragcli-test");
+            assert_eq!(report.telemetry.protocol, "http/protobuf");
+            assert_eq!(
+                report.telemetry.endpoint.as_deref(),
+                Some("http://localhost:6006/v1/traces")
+            );
+            assert!(report
+                .telemetry_error
+                .as_deref()
+                .unwrap()
+                .contains("unsupported OTEL_EXPORTER_OTLP_PROTOCOL value"));
+            assert!(serde_json::to_string(&report)
+                .unwrap()
+                .contains("\"telemetry_error\""));
+        })
+        .await;
+    }
+
+    #[test]
+    fn test_scoped_env_vars_restore_on_panic() {
+        let _guard = crate::config::test_env_lock().lock().unwrap();
+        let previous_service_name = env::var_os(crate::telemetry::ENV_OTEL_SERVICE_NAME);
+
+        let result = std::panic::catch_unwind(|| {
+            let _vars = ScopedEnvVars::set(&[(crate::telemetry::ENV_OTEL_SERVICE_NAME, "boom")]);
+            panic!("force unwind");
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            env::var_os(crate::telemetry::ENV_OTEL_SERVICE_NAME),
+            previous_service_name
+        );
+    }
+
+    unsafe fn restore_var(name: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
     }
 }
