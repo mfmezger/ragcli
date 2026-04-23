@@ -13,6 +13,7 @@ use crate::rewrite::{rewrite_query_for_retrieval, QueryRewriteSet};
 use crate::store;
 use anyhow::Result;
 use std::collections::BTreeSet;
+use tracing::{field, Instrument};
 
 use super::render::{
     evidence_verdict_label, print_citations, print_contexts, print_query_plan, print_query_trace,
@@ -24,154 +25,201 @@ use super::types::{QueryExecutionPath, QueryResult, QueryRuntime};
 
 pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
     let runtime = prepare_runtime(name, &command)?;
+    let execution = execution_path(command.mode);
+    let span = tracing::info_span!(
+        "query_pipeline",
+        store_name = name.unwrap_or("default"),
+        mode = ?command.mode,
+        execution_path = execution_path_label(execution),
+        question_chars = command.question.chars().count(),
+        top_k = command.top_k,
+        fetch_k = command.fetch_k,
+        max_iterations = command.max_iterations,
+        rewrite = command.rewrite,
+        rerank = command.rerank,
+        has_source_filter = command.source.is_some(),
+        has_path_prefix_filter = command.path_prefix.is_some(),
+        page = field::debug(command.page),
+        has_format_filter = command.format.is_some(),
+        hit_count = field::Empty,
+        iteration_count = field::Empty,
+    );
 
-    let result = match execution_path(command.mode) {
-        QueryExecutionPath::Simple => run_simple_query(&runtime, &command).await?,
-        QueryExecutionPath::Agentic => run_agentic_query_command(&runtime, &command).await?,
-        QueryExecutionPath::AgenticStub => {
-            run_agentic_stub_query_command(&runtime, &command).await?
+    let span_inner = span.clone();
+    async move {
+        let result = match execution {
+            QueryExecutionPath::Simple => run_simple_query(&runtime, &command).await?,
+            QueryExecutionPath::Agentic => run_agentic_query_command(&runtime, &command).await?,
+            QueryExecutionPath::AgenticStub => {
+                run_agentic_stub_query_command(&runtime, &command).await?
+            }
+        };
+
+        span_inner.record("hit_count", result.hits.len());
+        span_inner.record("iteration_count", result.iterations.len());
+
+        if result.hits.is_empty() {
+            println!("No relevant context found in the local store.");
+            return Ok(());
         }
-    };
 
-    if result.hits.is_empty() {
-        println!("No relevant context found in the local store.");
-        return Ok(());
+        print_query_plan(&command, &result);
+        print_query_trace(&command, &result);
+        print_scores(&command, &result);
+        print_citations(&command, &result);
+        print_contexts(&command, &result);
+
+        let answer = match &result.answer {
+            Some(answer) => answer.clone(),
+            None => generate_answer(&runtime, &command, &result).await?,
+        };
+        println!();
+        println!("{}", store::strip_thinking(&answer).trim());
+        Ok(())
     }
-
-    print_query_plan(&command, &result);
-    print_query_trace(&command, &result);
-    print_scores(&command, &result);
-    print_citations(&command, &result);
-    print_contexts(&command, &result);
-
-    let answer = match &result.answer {
-        Some(answer) => answer.clone(),
-        None => generate_answer(&runtime, &command, &result).await?,
-    };
-    println!();
-    println!("{}", store::strip_thinking(&answer).trim());
-    Ok(())
+    .instrument(span)
+    .await
 }
 
 async fn run_simple_query(runtime: &QueryRuntime, command: &QueryCommand) -> Result<QueryResult> {
-    let mut trace = vec![format!(
-        "mode {} uses the current hybrid retrieval pipeline",
-        mode_label(command.mode)
-    )];
-    let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-    let hits =
-        retrieve_candidates(runtime, command, &rewrite_set.query_variants(), &mut trace).await?;
+    let span = tracing::info_span!("run_simple_query", mode = ?command.mode);
+    async move {
+        let mut trace = vec![format!(
+            "mode {} uses the current hybrid retrieval pipeline",
+            mode_label(command.mode)
+        )];
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
+        let hits = retrieve_candidates(runtime, command, &rewrite_set.query_variants(), &mut trace)
+            .await?;
 
-    Ok(QueryResult {
-        requested_mode: command.mode,
-        execution_label: mode_label(command.mode),
-        rewrite_set,
-        plan: None,
-        iterations: Vec::new(),
-        support_check: None,
-        answer: None,
-        hits,
-        trace,
-    })
+        Ok(QueryResult {
+            requested_mode: command.mode,
+            execution_label: mode_label(command.mode),
+            rewrite_set,
+            plan: None,
+            iterations: Vec::new(),
+            support_check: None,
+            answer: None,
+            hits,
+            trace,
+        })
+    }
+    .instrument(span)
+    .await
 }
 
 async fn run_agentic_query_command(
     runtime: &QueryRuntime,
     command: &QueryCommand,
 ) -> Result<QueryResult> {
-    let generator = Generator::new(
-        runtime.cfg.ollama.base_url.clone(),
-        runtime.gen_model_name.clone(),
+    let span = tracing::info_span!(
+        "run_agentic_query",
+        mode = ?command.mode,
+        max_iterations = command.max_iterations,
+        rewrite = command.rewrite,
+        rerank = command.rerank,
     );
-    let mut trace = vec![format!(
-        "mode {} uses the agentic retrieval loop",
-        mode_label(command.mode)
-    )];
-    let plan = match build_query_plan(&generator, &command.question).await {
-        Ok(plan) => {
-            trace.push("planner produced a structured query plan".to_string());
-            plan
-        }
-        Err(err) => {
-            trace.push(format!(
-                "planner failed; falling back to heuristic plan ({})",
-                err.root_cause()
-            ));
-            fallback_query_plan(&command.question)
-        }
-    };
-
-    let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-    let mut iterations = Vec::new();
-    let mut previous_keys = Vec::new();
-    let mut active_queries = initial_agent_queries(&command.question, &plan, &rewrite_set);
-    let mut accumulated_hits = Vec::new();
-
-    for iteration in 1..=command.max_iterations.max(1) {
-        trace.push(format!(
-            "iteration {iteration}: querying {} variant(s)",
-            active_queries.len()
-        ));
-        let iteration_hits =
-            retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
-        let retrieved_count = iteration_hits.len();
-        accumulated_hits = merge_candidates([accumulated_hits, iteration_hits]);
-        let kept_hits = prune_candidates(accumulated_hits.clone(), command.top_k);
-        let assessment = match assess_evidence(&generator, &command.question, &kept_hits).await {
-            Ok(assessment) => assessment,
+    async move {
+        let generator = Generator::new(
+            runtime.cfg.ollama.base_url.clone(),
+            runtime.gen_model_name.clone(),
+        );
+        let mut trace = vec![format!(
+            "mode {} uses the agentic retrieval loop",
+            mode_label(command.mode)
+        )];
+        let plan = match build_query_plan(&generator, &command.question).await {
+            Ok(plan) => {
+                trace.push("planner produced a structured query plan".to_string());
+                plan
+            }
             Err(err) => {
                 trace.push(format!(
-                    "evidence assessment failed; using heuristic fallback ({})",
+                    "planner failed; falling back to heuristic plan ({})",
                     err.root_cause()
                 ));
-                fallback_evidence_assessment(&kept_hits)
+                fallback_query_plan(&command.question)
             }
         };
-        let notes = assessment_notes(&assessment);
-        iterations.push(AgentIteration {
-            iteration,
-            query_variants: active_queries.clone(),
-            retrieved_count,
-            kept_count: kept_hits.len(),
-            sufficiency: assessment.verdict.clone(),
-            notes: notes.clone(),
-        });
-        for note in notes {
-            trace.push(format!("iteration {iteration}: {note}"));
+
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
+        let mut iterations = Vec::new();
+        let mut previous_keys = Vec::new();
+        let mut active_queries = initial_agent_queries(&command.question, &plan, &rewrite_set);
+        let mut accumulated_hits = Vec::new();
+
+        for iteration in 1..=command.max_iterations.max(1) {
+            trace.push(format!(
+                "iteration {iteration}: querying {} variant(s)",
+                active_queries.len()
+            ));
+            let iteration_hits =
+                retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
+            let retrieved_count = iteration_hits.len();
+            accumulated_hits = merge_candidates([accumulated_hits, iteration_hits]);
+            let kept_hits = prune_candidates(accumulated_hits.clone(), command.top_k);
+            let assessment = match assess_evidence(&generator, &command.question, &kept_hits).await
+            {
+                Ok(assessment) => assessment,
+                Err(err) => {
+                    trace.push(format!(
+                        "evidence assessment failed; using heuristic fallback ({})",
+                        err.root_cause()
+                    ));
+                    fallback_evidence_assessment(&kept_hits)
+                }
+            };
+            let notes = assessment_notes(&assessment);
+            iterations.push(AgentIteration {
+                iteration,
+                query_variants: active_queries.clone(),
+                retrieved_count,
+                kept_count: kept_hits.len(),
+                sufficiency: assessment.verdict.clone(),
+                notes: notes.clone(),
+            });
+            for note in notes {
+                trace.push(format!("iteration {iteration}: {note}"));
+            }
+
+            if matches!(assessment.verdict, EvidenceVerdict::Sufficient) {
+                trace.push(format!("iteration {iteration}: evidence marked sufficient"));
+                break;
+            }
+            if iteration >= command.max_iterations.max(1) {
+                trace.push("iteration budget exhausted".to_string());
+                break;
+            }
+
+            let current_keys = kept_hits
+                .iter()
+                .map(|hit| hit.dedupe_key())
+                .collect::<Vec<_>>();
+            if !previous_keys.is_empty() && current_keys == previous_keys {
+                trace.push("retrieval produced no material evidence change; halting".to_string());
+                break;
+            }
+            previous_keys = current_keys;
+
+            let next_queries =
+                refine_agent_queries(&command.question, &plan, &rewrite_set, &assessment);
+            if next_queries == active_queries {
+                trace.push("no better follow-up queries available; halting".to_string());
+                break;
+            }
+            active_queries = next_queries;
         }
 
-        if matches!(assessment.verdict, EvidenceVerdict::Sufficient) {
-            trace.push(format!("iteration {iteration}: evidence marked sufficient"));
-            break;
-        }
-        if iteration >= command.max_iterations.max(1) {
-            trace.push("iteration budget exhausted".to_string());
-            break;
-        }
-
-        let current_keys = kept_hits
-            .iter()
-            .map(|hit| hit.dedupe_key())
-            .collect::<Vec<_>>();
-        if !previous_keys.is_empty() && current_keys == previous_keys {
-            trace.push("retrieval produced no material evidence change; halting".to_string());
-            break;
-        }
-        previous_keys = current_keys;
-
-        let next_queries =
-            refine_agent_queries(&command.question, &plan, &rewrite_set, &assessment);
-        if next_queries == active_queries {
-            trace.push("no better follow-up queries available; halting".to_string());
-            break;
-        }
-        active_queries = next_queries;
-    }
-
-    let final_hits = prune_candidates(accumulated_hits, command.top_k);
-    let answer = generate_answer_from_hits(runtime, command, &final_hits).await?;
-    let support_check =
-        match verify_answer_support(&generator, &command.question, &answer, &final_hits).await {
+        let final_hits = prune_candidates(accumulated_hits, command.top_k);
+        let answer = generate_answer_from_hits(runtime, command, &final_hits).await?;
+        let support_check = match verify_answer_support(
+            &generator,
+            &command.question,
+            &answer,
+            &final_hits,
+        )
+        .await
+        {
             Ok(check) => check,
             Err(err) => {
                 trace.push(format!(
@@ -181,52 +229,61 @@ async fn run_agentic_query_command(
                 fallback_support_check(&answer, &final_hits)
             }
         };
-    if support_check.supported {
-        trace.push("answer support verification passed".to_string());
-    } else {
-        trace.push(format!(
-            "answer support verification found {} unsupported claim(s)",
-            support_check.unsupported_claims.len()
-        ));
-    }
+        if support_check.supported {
+            trace.push("answer support verification passed".to_string());
+        } else {
+            trace.push(format!(
+                "answer support verification found {} unsupported claim(s)",
+                support_check.unsupported_claims.len()
+            ));
+        }
 
-    Ok(QueryResult {
-        requested_mode: command.mode,
-        execution_label: "agentic",
-        rewrite_set,
-        plan: Some(plan),
-        iterations,
-        support_check: Some(support_check),
-        answer: Some(answer),
-        hits: final_hits,
-        trace,
-    })
+        Ok(QueryResult {
+            requested_mode: command.mode,
+            execution_label: "agentic",
+            rewrite_set,
+            plan: Some(plan),
+            iterations,
+            support_check: Some(support_check),
+            answer: Some(answer),
+            hits: final_hits,
+            trace,
+        })
+    }
+    .instrument(span)
+    .await
 }
 
 async fn run_agentic_stub_query_command(
     runtime: &QueryRuntime,
     command: &QueryCommand,
 ) -> Result<QueryResult> {
-    let mut trace = vec![format!(
-        "requested {} mode routed through the graph-mode placeholder path",
-        mode_label(command.mode)
-    )];
-    let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-    let stub_plan = placeholder_plan(command.mode, &rewrite_set);
-    trace.extend(stub_plan.notes.iter().cloned());
-    let hits = retrieve_candidates(runtime, command, &stub_plan.query_variants, &mut trace).await?;
+    let span = tracing::info_span!("run_agentic_stub_query", mode = ?command.mode);
+    async move {
+        let mut trace = vec![format!(
+            "requested {} mode routed through the graph-mode placeholder path",
+            mode_label(command.mode)
+        )];
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
+        let stub_plan = placeholder_plan(command.mode, &rewrite_set);
+        trace.extend(stub_plan.notes.iter().cloned());
+        let hits =
+            retrieve_candidates(runtime, command, &stub_plan.query_variants, &mut trace).await?;
 
-    Ok(QueryResult {
-        requested_mode: command.mode,
-        execution_label: stub_plan.execution_label,
-        rewrite_set,
-        plan: None,
-        iterations: Vec::new(),
-        support_check: None,
-        answer: None,
-        hits,
-        trace,
-    })
+        Ok(QueryResult {
+            requested_mode: command.mode,
+            execution_label: stub_plan.execution_label,
+            rewrite_set,
+            plan: None,
+            iterations: Vec::new(),
+            support_check: None,
+            answer: None,
+            hits,
+            trace,
+        })
+    }
+    .instrument(span)
+    .await
 }
 
 async fn build_rewrite_set(
@@ -234,35 +291,44 @@ async fn build_rewrite_set(
     command: &QueryCommand,
     trace: &mut Vec<String>,
 ) -> QueryRewriteSet {
-    if !command.rewrite {
-        trace.push("rewrite disabled; using original query only".to_string());
-        return QueryRewriteSet::fallback(&command.question);
-    }
-
-    let generator = Generator::new(
-        runtime.cfg.ollama.base_url.clone(),
-        runtime.gen_model_name.clone(),
+    let span = tracing::info_span!(
+        "build_rewrite_set",
+        enabled = command.rewrite,
+        question_chars = command.question.chars().count(),
     );
-    match rewrite_query_for_retrieval(&generator, &command.question).await {
-        Ok(rewrite_set) => {
-            let variants = rewrite_set.query_variants();
-            trace.push(format!(
-                "rewrite enabled; {} retrieval query variant(s) prepared",
-                variants.len()
-            ));
-            for variant in variants.iter().skip(1) {
-                trace.push(format!("rewrite variant: {variant}"));
-            }
-            rewrite_set
+    async move {
+        if !command.rewrite {
+            trace.push("rewrite disabled; using original query only".to_string());
+            return QueryRewriteSet::fallback(&command.question);
         }
-        Err(err) => {
-            trace.push(format!(
-                "rewrite failed; falling back to original query ({})",
-                err.root_cause()
-            ));
-            QueryRewriteSet::fallback(&command.question)
+
+        let generator = Generator::new(
+            runtime.cfg.ollama.base_url.clone(),
+            runtime.gen_model_name.clone(),
+        );
+        match rewrite_query_for_retrieval(&generator, &command.question).await {
+            Ok(rewrite_set) => {
+                let variants = rewrite_set.query_variants();
+                trace.push(format!(
+                    "rewrite enabled; {} retrieval query variant(s) prepared",
+                    variants.len()
+                ));
+                for variant in variants.iter().skip(1) {
+                    trace.push(format!("rewrite variant: {variant}"));
+                }
+                rewrite_set
+            }
+            Err(err) => {
+                trace.push(format!(
+                    "rewrite failed; falling back to original query ({})",
+                    err.root_cause()
+                ));
+                QueryRewriteSet::fallback(&command.question)
+            }
         }
     }
+    .instrument(span)
+    .await
 }
 
 async fn generate_answer(
@@ -278,14 +344,24 @@ async fn generate_answer_from_hits(
     command: &QueryCommand,
     hits: &[RetrievalCandidate],
 ) -> Result<String> {
-    let generator = Generator::new(
-        runtime.cfg.ollama.base_url.clone(),
-        runtime.gen_model_name.clone(),
+    let span = tracing::info_span!(
+        "generate_answer_from_hits",
+        hit_count = hits.len(),
+        question_chars = command.question.chars().count(),
+        max_tokens = command.max_tokens,
     );
-    let contexts = labeled_contexts(hits);
-    generator
-        .generate_answer(&contexts, &command.question, command.max_tokens)
-        .await
+    async move {
+        let generator = Generator::new(
+            runtime.cfg.ollama.base_url.clone(),
+            runtime.gen_model_name.clone(),
+        );
+        let contexts = labeled_contexts(hits);
+        generator
+            .generate_answer(&contexts, &command.question, command.max_tokens)
+            .await
+    }
+    .instrument(span)
+    .await
 }
 
 fn initial_agent_queries(
@@ -356,6 +432,14 @@ fn execution_path(mode: QueryModeArg) -> QueryExecutionPath {
         QueryModeArg::Local | QueryModeArg::Global | QueryModeArg::Mix => {
             QueryExecutionPath::AgenticStub
         }
+    }
+}
+
+fn execution_path_label(path: QueryExecutionPath) -> &'static str {
+    match path {
+        QueryExecutionPath::Simple => "simple",
+        QueryExecutionPath::Agentic => "agentic",
+        QueryExecutionPath::AgenticStub => "agentic_stub",
     }
 }
 

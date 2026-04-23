@@ -3,6 +3,7 @@ use crate::models::Generator;
 use crate::retrieval::{apply_rerank_order, RetrievalCandidate};
 use crate::rewrite::trim_json_fences;
 use anyhow::{Context, Result};
+use tracing::{field, Instrument};
 
 use super::types::QueryRuntime;
 
@@ -26,38 +27,54 @@ pub(crate) async fn rerank_candidates(
     candidates: Vec<RetrievalCandidate>,
     trace: &mut Vec<String>,
 ) -> Vec<RetrievalCandidate> {
-    if !command.rerank || candidates.len() <= 1 {
-        trace.push("rerank disabled; using fused retrieval order".to_string());
-        return candidates;
-    }
-
-    let generator = Generator::new(
-        runtime.cfg.ollama.base_url.clone(),
-        runtime.gen_model_name.clone(),
+    let span = tracing::info_span!(
+        "rerank_candidates",
+        enabled = command.rerank,
+        candidate_count = candidates.len(),
+        fetch_k = command.fetch_k,
+        returned_candidates = field::Empty,
     );
-    match rerank_with_model(
-        &generator,
-        &command.question,
-        &candidates,
-        command.fetch_k.min(candidates.len()),
-    )
-    .await
-    {
-        Ok(reranked) => {
-            trace.push(format!(
-                "rerank enabled; reordered {} candidate(s)",
-                reranked.len()
-            ));
-            reranked
+
+    let span_inner = span.clone();
+    async move {
+        if !command.rerank || candidates.len() <= 1 {
+            trace.push("rerank disabled; using fused retrieval order".to_string());
+            span_inner.record("returned_candidates", candidates.len());
+            return candidates;
         }
-        Err(err) => {
-            trace.push(format!(
-                "rerank failed; falling back to fused retrieval order ({})",
-                err.root_cause()
-            ));
-            candidates
+
+        let generator = Generator::new(
+            runtime.cfg.ollama.base_url.clone(),
+            runtime.gen_model_name.clone(),
+        );
+        match rerank_with_model(
+            &generator,
+            &command.question,
+            &candidates,
+            command.fetch_k.min(candidates.len()),
+        )
+        .await
+        {
+            Ok(reranked) => {
+                span_inner.record("returned_candidates", reranked.len());
+                trace.push(format!(
+                    "rerank enabled; reordered {} candidate(s)",
+                    reranked.len()
+                ));
+                reranked
+            }
+            Err(err) => {
+                span_inner.record("returned_candidates", candidates.len());
+                trace.push(format!(
+                    "rerank failed; falling back to fused retrieval order ({})",
+                    err.root_cause()
+                ));
+                candidates
+            }
         }
     }
+    .instrument(span)
+    .await
 }
 
 async fn rerank_with_model(
@@ -66,18 +83,29 @@ async fn rerank_with_model(
     candidates: &[RetrievalCandidate],
     top_n: usize,
 ) -> Result<Vec<RetrievalCandidate>> {
-    let prompt = build_rerank_prompt(question, candidates);
-    let response = generator
-        .generate_json(
-            "You rerank retrieval candidates for a local RAG CLI. Respond with strict JSON only and no markdown fences.",
-            &prompt,
-            RERANK_RESPONSE_TOKENS,
-        )
-        .await
-        .context("generate rerank JSON")?;
-    let ranked_positions = parse_rerank_payload(&response)?;
-    let ranked_ids = resolve_rerank_positions(candidates, &ranked_positions);
-    Ok(apply_rerank_order(candidates, &ranked_ids, top_n))
+    let span = tracing::info_span!(
+        "rerank_with_model",
+        question_chars = question.chars().count(),
+        candidate_count = candidates.len(),
+        top_n,
+    );
+
+    async move {
+        let prompt = build_rerank_prompt(question, candidates);
+        let response = generator
+            .generate_json(
+                "You rerank retrieval candidates for a local RAG CLI. Respond with strict JSON only and no markdown fences.",
+                &prompt,
+                RERANK_RESPONSE_TOKENS,
+            )
+            .await
+            .context("generate rerank JSON")?;
+        let ranked_positions = parse_rerank_payload(&response)?;
+        let ranked_ids = resolve_rerank_positions(candidates, &ranked_positions);
+        Ok(apply_rerank_order(candidates, &ranked_ids, top_n))
+    }
+    .instrument(span)
+    .await
 }
 
 fn build_rerank_prompt(question: &str, candidates: &[RetrievalCandidate]) -> String {

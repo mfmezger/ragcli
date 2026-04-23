@@ -36,23 +36,23 @@ This checklist tracks the planned work to add optional OpenTelemetry trace expor
 
 ## Milestone 2: Instrumentation
 
-- [ ] Keep or improve root command span in `src/app.rs`
-- [ ] Add attributes for command/store/query mode at the command level
-- [ ] Expand indexing spans in `src/commands/index.rs`
-- [ ] Add query lifecycle spans in `src/query/execute.rs`
-- [ ] Add retrieval/rerank spans in `src/query/retrieve.rs` and `src/query/rerank.rs`
-- [ ] Add Ollama spans in `src/models.rs` for:
-  - [ ] tags/model discovery
-  - [ ] embeddings
-  - [ ] chat/generation
-  - [ ] vision captioning
-- [ ] Record safe metadata only by default:
-  - [ ] model name
-  - [ ] endpoint/host
-  - [ ] duration
-  - [ ] counts and sizes
-  - [ ] success/failure
-- [ ] Avoid exporting full prompts, contexts, image bytes, or source content by default
+- [x] Keep or improve root command span in `src/app.rs`
+- [x] Add attributes for command/store/query mode at the command level
+- [x] Expand indexing spans in `src/commands/index.rs`
+- [x] Add query lifecycle spans in `src/query/execute.rs`
+- [x] Add retrieval/rerank spans in `src/query/retrieve.rs` and `src/query/rerank.rs`
+- [x] Add Ollama spans in `src/models.rs` for:
+  - [x] tags/model discovery
+  - [x] embeddings
+  - [x] chat/generation
+  - [x] vision captioning
+- [x] Record safe metadata only by default:
+  - [x] model name
+  - [x] endpoint/host
+  - [x] duration
+  - [x] counts and sizes
+  - [x] success/failure
+- [x] Avoid exporting full prompts, contexts, image bytes, or source content by default
 
 ## Milestone 3: Doctor, docs, and validation
 
