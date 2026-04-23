@@ -9,7 +9,7 @@ use crate::store::{connect_db, ensure_metadata, load_source_fingerprints, replac
 use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Instant;
-use tracing::Instrument;
+use tracing::{field, Instrument};
 
 pub async fn run(
     name: Option<&str>,
@@ -22,72 +22,112 @@ pub async fn run(
     include_hidden: bool,
     force: bool,
 ) -> Result<()> {
-    let started = Instant::now();
-    let store = store_dir(name)?;
-    ensure_store_layout(&store)?;
-    let cfg = load_or_create_config(&store)?;
-
-    let (size, overlap) = normalize_chunk_settings(
-        chunk_size.unwrap_or(cfg.chunk.size),
-        chunk_overlap.unwrap_or(cfg.chunk.overlap),
+    let command_span = tracing::info_span!(
+        "index_command",
+        store_name = name.unwrap_or("default"),
+        path = %path.display(),
+        requested_chunk_size = field::debug(chunk_size),
+        requested_chunk_overlap = field::debug(chunk_overlap),
+        requested_embed_model = field::debug(embed_model.as_deref()),
+        pdf_parser = field::debug(pdf_parser),
+        exclude_count = exclude.len(),
+        include_hidden,
+        force,
+        indexed_files = field::Empty,
+        total_chunks = field::Empty,
+        skipped_files = field::Empty,
+        error_count = field::Empty,
+        elapsed_ms = field::Empty,
     );
-    let embed_model_name =
-        embed_model.unwrap_or_else(|| resolve_model_name(&store, &cfg.models.embed));
 
-    let embedder = Embedder::new(cfg.ollama.base_url.clone(), embed_model_name.clone());
-    let vision = VisionCaptioner::new(
-        cfg.ollama.base_url.clone(),
-        resolve_model_name(&store, &cfg.models.vision),
-    );
-    let db = connect_db(&store).await?;
-    let existing_fingerprints = if force {
-        Default::default()
-    } else {
-        load_source_fingerprints(&db).await?
-    };
+    let command_span_inner = command_span.clone();
+    async move {
+        let started = Instant::now();
+        let store = store_dir(name)?;
+        ensure_store_layout(&store)?;
+        let cfg = load_or_create_config(&store)?;
 
-    let span = tracing::info_span!("ingest_path", path = %path.display());
-    let result = ingest_path(
-        &path,
-        size,
-        overlap,
-        &embedder,
-        Some(&vision),
-        match pdf_parser.unwrap_or(PdfParserArg::Native) {
+        let (size, overlap) = normalize_chunk_settings(
+            chunk_size.unwrap_or(cfg.chunk.size),
+            chunk_overlap.unwrap_or(cfg.chunk.overlap),
+        );
+        let embed_model_name =
+            embed_model.unwrap_or_else(|| resolve_model_name(&store, &cfg.models.embed));
+        let vision_model_name = resolve_model_name(&store, &cfg.models.vision);
+        command_span_inner.record("requested_chunk_size", size);
+        command_span_inner.record("requested_chunk_overlap", overlap);
+        command_span_inner.record("requested_embed_model", field::debug(&embed_model_name));
+
+        let embedder = Embedder::new(cfg.ollama.base_url.clone(), embed_model_name.clone());
+        let vision = VisionCaptioner::new(cfg.ollama.base_url.clone(), vision_model_name);
+        let db = connect_db(&store).await?;
+        let existing_fingerprints = if force {
+            Default::default()
+        } else {
+            load_source_fingerprints(&db).await?
+        };
+
+        let parser = match pdf_parser.unwrap_or(PdfParserArg::Native) {
             PdfParserArg::Native => PdfParser::Native,
             PdfParserArg::Liteparse => PdfParser::Liteparse,
-        },
-        &exclude,
-        include_hidden,
-        &existing_fingerprints,
-        force,
-    )
-    .instrument(span)
-    .await?;
+        };
+        let ingest_span = tracing::info_span!(
+            "ingest_path",
+            path = %path.display(),
+            chunk_size = size,
+            chunk_overlap = overlap,
+            parser = ?parser,
+            include_hidden,
+            force,
+        );
+        let result = ingest_path(
+            &path,
+            size,
+            overlap,
+            &embedder,
+            Some(&vision),
+            parser,
+            &exclude,
+            include_hidden,
+            &existing_fingerprints,
+            force,
+        )
+        .instrument(ingest_span)
+        .await?;
 
-    if let Some(dim) = result.embedding_dim {
-        ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
-    }
-
-    if !result.source_paths.is_empty() {
-        replace_source_rows(&db, &result.rows, &result.source_paths).await?;
-    }
-
-    println!(
-        "Index complete: {} files, {} chunks, {} skipped, {}ms",
-        result.stats.indexed_files,
-        result.stats.total_chunks,
-        result.stats.skipped_files,
-        started.elapsed().as_millis()
-    );
-
-    if !result.stats.errors.is_empty() {
-        for err in &result.stats.errors {
-            eprintln!("index error: {err}");
+        if let Some(dim) = result.embedding_dim {
+            ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;
         }
-    }
 
-    Ok(())
+        if !result.source_paths.is_empty() {
+            replace_source_rows(&db, &result.rows, &result.source_paths).await?;
+        }
+
+        let elapsed_ms = started.elapsed().as_millis();
+        command_span_inner.record("indexed_files", result.stats.indexed_files);
+        command_span_inner.record("total_chunks", result.stats.total_chunks);
+        command_span_inner.record("skipped_files", result.stats.skipped_files);
+        command_span_inner.record("error_count", result.stats.errors.len());
+        command_span_inner.record("elapsed_ms", elapsed_ms as u64);
+
+        println!(
+            "Index complete: {} files, {} chunks, {} skipped, {}ms",
+            result.stats.indexed_files,
+            result.stats.total_chunks,
+            result.stats.skipped_files,
+            elapsed_ms
+        );
+
+        if !result.stats.errors.is_empty() {
+            for err in &result.stats.errors {
+                eprintln!("index error: {err}");
+            }
+        }
+
+        Ok(())
+    }
+    .instrument(command_span)
+    .await
 }
 
 #[cfg(test)]

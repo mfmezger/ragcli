@@ -1,13 +1,18 @@
 use crate::cli::{Cli, Command, ConfigCommand};
 use crate::commands;
 use anyhow::Result;
-use tracing::Instrument;
+use tracing::{field, Instrument};
 
 pub async fn run(cli: Cli) -> Result<()> {
     let name = cli.name.as_deref();
     let span_name = name.unwrap_or("default");
-    tracing::info!(name = span_name, "starting ragcli");
-    let span = tracing::info_span!("command_dispatch", name = span_name);
+    let command_name = command_name(&cli.command);
+    tracing::info!(name = span_name, command = command_name, "starting ragcli");
+    let span = tracing::info_span!(
+        "command_dispatch",
+        store_name = span_name,
+        command = command_name
+    );
 
     async move {
         match cli.command {
@@ -54,6 +59,20 @@ pub async fn run(cli: Cli) -> Result<()> {
                 gen_model,
                 max_tokens,
             } => {
+                let span = tracing::info_span!(
+                    "query_command",
+                    mode = ?mode,
+                    top_k,
+                    fetch_k,
+                    max_iterations,
+                    rewrite,
+                    rerank,
+                    has_source_filter = source.is_some(),
+                    has_path_prefix_filter = path_prefix.is_some(),
+                    page = field::debug(page),
+                    has_format_filter = format.is_some(),
+                    max_tokens
+                );
                 commands::query::run(
                     name,
                     commands::query::QueryCommand {
@@ -77,6 +96,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         max_tokens,
                     },
                 )
+                .instrument(span)
                 .await?
             }
             Command::Config { command } => match command {
@@ -99,4 +119,18 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
     .instrument(span)
     .await
+}
+
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Index { .. } => "index",
+        Command::Query { .. } => "query",
+        Command::Config { .. } => "config",
+        Command::Sources { .. } => "sources",
+        Command::Delete { .. } => "delete",
+        Command::Clear { .. } => "clear",
+        Command::Prune { .. } => "prune",
+        Command::Stat { .. } => "stat",
+        Command::Doctor { .. } => "doctor",
+    }
 }

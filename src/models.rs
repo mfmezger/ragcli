@@ -6,7 +6,8 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::Client;
 use serde::Deserialize;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::{field, Instrument};
 
 /// Embedding client backed by Ollama's `/api/embed` endpoint.
 pub struct Embedder {
@@ -75,19 +76,44 @@ impl OllamaClient {
 
     /// Returns the installed model names reported by Ollama.
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        let (status, body) = self
-            .client
-            .get_text(url)
-            .await
-            .context("call Ollama tags API")?;
-        if !status.is_success() {
-            anyhow::bail!("Ollama tags API error: {} - {}", status, body);
-        }
+        let span = tracing::info_span!(
+            "ollama_request",
+            backend = "ollama",
+            operation = "tags",
+            endpoint_host = %endpoint_host(&self.base_url),
+            success = field::Empty,
+            response_models = field::Empty,
+            duration_ms = field::Empty,
+        );
+        let started = Instant::now();
+        let result = async {
+            let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
+            let (status, body) = self
+                .client
+                .get_text(url)
+                .await
+                .context("call Ollama tags API")?;
+            if !status.is_success() {
+                anyhow::bail!("Ollama tags API error: {} - {}", status, body);
+            }
 
-        let parsed: TagsResponse =
-            serde_json::from_str(&body).context("parse Ollama tags response")?;
-        Ok(parsed.models.into_iter().map(|model| model.name).collect())
+            let parsed: TagsResponse =
+                serde_json::from_str(&body).context("parse Ollama tags response")?;
+            Ok(parsed
+                .models
+                .into_iter()
+                .map(|model| model.name)
+                .collect::<Vec<_>>())
+        }
+        .instrument(span.clone())
+        .await;
+
+        span.record("success", result.is_ok());
+        span.record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Ok(models) = &result {
+            span.record("response_models", models.len());
+        }
+        result
     }
 }
 
@@ -103,28 +129,51 @@ impl Embedder {
 
     /// Embeds a single text input and returns its vector.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let url = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "input": text,
-        });
-        let (status, body) = self
-            .client
-            .post_json(url, request_body)
-            .await
-            .context("call Ollama embed API")?;
-        if !status.is_success() {
-            anyhow::bail!("Ollama embed API error: {} - {}", status, body);
-        }
+        let span = tracing::info_span!(
+            "ollama_request",
+            backend = "ollama",
+            operation = "embed",
+            model = %self.model,
+            endpoint_host = %endpoint_host(&self.base_url),
+            input_bytes = text.len(),
+            success = field::Empty,
+            embedding_dim = field::Empty,
+            duration_ms = field::Empty,
+        );
+        let started = Instant::now();
+        let result = async {
+            let url = format!("{}/api/embed", self.base_url.trim_end_matches('/'));
+            let request_body = serde_json::json!({
+                "model": self.model,
+                "input": text,
+            });
+            let (status, body) = self
+                .client
+                .post_json(url, request_body)
+                .await
+                .context("call Ollama embed API")?;
+            if !status.is_success() {
+                anyhow::bail!("Ollama embed API error: {} - {}", status, body);
+            }
 
-        let parsed: EmbedResponse =
-            serde_json::from_str(&body).context("parse Ollama embed response")?;
-        let embedding = parsed
-            .embeddings
-            .into_iter()
-            .next()
-            .context("Ollama embed response did not include an embedding")?;
-        Ok(embedding)
+            let parsed: EmbedResponse =
+                serde_json::from_str(&body).context("parse Ollama embed response")?;
+            let embedding = parsed
+                .embeddings
+                .into_iter()
+                .next()
+                .context("Ollama embed response did not include an embedding")?;
+            Ok(embedding)
+        }
+        .instrument(span.clone())
+        .await;
+
+        span.record("success", result.is_ok());
+        span.record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Ok(embedding) = &result {
+            span.record("embedding_dim", embedding.len());
+        }
+        result
     }
 }
 
@@ -170,37 +219,62 @@ impl Generator {
         user_prompt: &str,
         max_tokens: usize,
     ) -> Result<String> {
-        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "stream": false,
-            "think": false,
-            "options": {
-                "num_predict": max_tokens,
-            },
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
+        let span = tracing::info_span!(
+            "ollama_request",
+            backend = "ollama",
+            operation = "chat",
+            model = %self.model,
+            endpoint_host = %endpoint_host(&self.base_url),
+            system_prompt_bytes = system_prompt.len(),
+            user_prompt_bytes = user_prompt.len(),
+            max_tokens,
+            success = field::Empty,
+            response_bytes = field::Empty,
+            duration_ms = field::Empty,
+        );
+        let started = Instant::now();
+        let result = async {
+            let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+            let request_body = serde_json::json!({
+                "model": self.model,
+                "stream": false,
+                "think": false,
+                "options": {
+                    "num_predict": max_tokens,
                 },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                }
-            ]
-        });
-        let (status, body) = self
-            .client
-            .post_json(url, request_body)
-            .await
-            .context("call Ollama chat API")?;
-        if !status.is_success() {
-            anyhow::bail!("Ollama chat API error: {} - {}", status, body);
-        }
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_prompt,
+                    }
+                ]
+            });
+            let (status, body) = self
+                .client
+                .post_json(url, request_body)
+                .await
+                .context("call Ollama chat API")?;
+            if !status.is_success() {
+                anyhow::bail!("Ollama chat API error: {} - {}", status, body);
+            }
 
-        let parsed: ChatResponse =
-            serde_json::from_str(&body).context("parse Ollama chat response")?;
-        Ok(parsed.message.content)
+            let parsed: ChatResponse =
+                serde_json::from_str(&body).context("parse Ollama chat response")?;
+            Ok(parsed.message.content)
+        }
+        .instrument(span.clone())
+        .await;
+
+        span.record("success", result.is_ok());
+        span.record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Ok(content) = &result {
+            span.record("response_bytes", content.len());
+        }
+        result
     }
 }
 
@@ -216,38 +290,62 @@ impl VisionCaptioner {
 
     /// Produces a retrieval-oriented caption for an image file.
     pub async fn caption_image(&self, image_path: &Path) -> Result<String> {
-        let bytes = std::fs::read(image_path)
-            .with_context(|| format!("read image: {}", image_path.display()))?;
-        let image_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-        let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
+        let span = tracing::info_span!(
+            "ollama_request",
+            backend = "ollama",
+            operation = "vision",
+            model = %self.model,
+            endpoint_host = %endpoint_host(&self.base_url),
+            image_bytes = field::Empty,
+            success = field::Empty,
+            response_bytes = field::Empty,
+            duration_ms = field::Empty,
+        );
+        let started = Instant::now();
+        let result = async {
+            let bytes = std::fs::read(image_path)
+                .with_context(|| format!("read image: {}", image_path.display()))?;
+            span.record("image_bytes", bytes.len());
+            let image_b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
 
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "stream": false,
-            "think": false,
-            "options": {
-                "num_predict": 128,
-            },
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Describe this image for retrieval. Focus on the subjects, setting, and notable visual details.",
-                    "images": [image_b64],
-                }
-            ]
-        });
-        let (status, body) = self
-            .client
-            .post_json(url, request_body)
-            .await
-            .context("call Ollama vision chat API")?;
-        if !status.is_success() {
-            anyhow::bail!("Ollama vision API error: {} - {}", status, body);
+            let request_body = serde_json::json!({
+                "model": self.model,
+                "stream": false,
+                "think": false,
+                "options": {
+                    "num_predict": 128,
+                },
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Describe this image for retrieval. Focus on the subjects, setting, and notable visual details.",
+                        "images": [image_b64],
+                    }
+                ]
+            });
+            let (status, body) = self
+                .client
+                .post_json(url, request_body)
+                .await
+                .context("call Ollama vision chat API")?;
+            if !status.is_success() {
+                anyhow::bail!("Ollama vision API error: {} - {}", status, body);
+            }
+
+            let parsed: ChatResponse =
+                serde_json::from_str(&body).context("parse Ollama vision response")?;
+            Ok(parsed.message.content)
         }
+        .instrument(span.clone())
+        .await;
 
-        let parsed: ChatResponse =
-            serde_json::from_str(&body).context("parse Ollama vision response")?;
-        Ok(parsed.message.content)
+        span.record("success", result.is_ok());
+        span.record("duration_ms", started.elapsed().as_millis() as u64);
+        if let Ok(content) = &result {
+            span.record("response_bytes", content.len());
+        }
+        result
     }
 }
 
@@ -295,6 +393,17 @@ impl HttpClient {
         let body = response.text().await.context("read HTTP response body")?;
         Ok((status, body))
     }
+}
+
+fn endpoint_host(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .map(|url| match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_string(),
+            _ => base_url.to_string(),
+        })
+        .unwrap_or_else(|| base_url.to_string())
 }
 
 fn build_user_prompt(contexts: &[String], question: &str) -> String {
