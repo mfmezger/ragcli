@@ -296,7 +296,6 @@ impl VisionCaptioner {
             operation = "vision",
             model = %self.model,
             endpoint_host = %endpoint_host(&self.base_url),
-            image_path = %image_path.display(),
             image_bytes = field::Empty,
             success = field::Empty,
             response_bytes = field::Empty,
