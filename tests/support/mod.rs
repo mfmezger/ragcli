@@ -11,6 +11,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 const TELEMETRY_ENVS: [&str; 5] = [
     "OTEL_SERVICE_NAME",
@@ -64,8 +65,8 @@ where
 
     let output = command.output().unwrap();
     CliOutput {
-        stdout: String::from_utf8(output.stdout).unwrap(),
-        stderr: String::from_utf8(output.stderr).unwrap(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         success: output.status.success(),
     }
 }
@@ -136,6 +137,7 @@ struct HttpRequest {
 fn serve(listener: TcpListener, stop: Arc<AtomicBool>, config: MockOllamaConfig) {
     loop {
         let (mut stream, _) = listener.accept().expect("accept mock ollama request");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -175,7 +177,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let content_length = lines
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            if name.eq_ignore_ascii_case("content-length") {
+            if name.trim().eq_ignore_ascii_case("content-length") {
                 value.trim().parse::<usize>().ok()
             } else {
                 None
