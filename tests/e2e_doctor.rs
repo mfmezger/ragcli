@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use support::{run_ragcli, MockOllamaConfig, MockOllamaServer};
 
 #[test]
@@ -23,5 +24,15 @@ fn test_doctor_json_reports_store_layout_and_installed_models() {
     assert_eq!(report["store"]["status"], "exists");
     assert_eq!(report["config"]["status"], "exists");
     assert_eq!(report["metadata"]["status"], "missing");
-    assert_eq!(report["subdirectories"].as_array().unwrap().len(), 4);
+
+    let subdirectory_names = report["subdirectories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        subdirectory_names,
+        BTreeSet::from(["cache", "lancedb", "meta", "models"])
+    );
 }

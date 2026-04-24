@@ -191,7 +191,8 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         buffer.extend_from_slice(&chunk[..read]);
     }
 
-    let body = String::from_utf8_lossy(&buffer[headers_end..headers_end + content_length]).into();
+    let body_end = headers_end.saturating_add(content_length).min(buffer.len());
+    let body = String::from_utf8_lossy(&buffer[headers_end..body_end]).into();
     Some(HttpRequest { method, path, body })
 }
 
