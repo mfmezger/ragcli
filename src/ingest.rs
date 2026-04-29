@@ -9,6 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use reqwest::Url;
+use scraper::{Html, Selector};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -814,74 +815,18 @@ fn render_html_text(html: &str) -> Result<String> {
 }
 
 fn extract_html_title(html: &str) -> Option<String> {
-    let without_comments = strip_html_comments(html);
-    let lower = without_comments.to_ascii_lowercase();
-    let start = lower.find("<title")?;
-    let after_start = &without_comments[start..];
-    let title_body_start = after_start.find('>')? + start + 1;
-    let end = lower[title_body_start..].find("</title>")? + title_body_start;
-    let title = without_comments[title_body_start..end]
+    let document = Html::parse_document(html);
+    let selector = Selector::parse("title").expect("valid title selector");
+    let title = document
+        .select(&selector)
+        .next()?
+        .text()
+        .collect::<Vec<_>>()
+        .join(" ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let title = decode_html_entities(&title);
     (!title.is_empty()).then_some(title)
-}
-
-fn strip_html_comments(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut remaining = html;
-    while let Some(start) = remaining.find("<!--") {
-        out.push_str(&remaining[..start]);
-        let comment = &remaining[start + 4..];
-        let Some(end) = comment.find("-->") else {
-            return out;
-        };
-        remaining = &comment[end + 3..];
-    }
-    out.push_str(remaining);
-    out
-}
-
-fn decode_html_entities(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(start) = remaining.find('&') {
-        out.push_str(&remaining[..start]);
-        let entity_candidate = &remaining[start + 1..];
-        let Some(end) = entity_candidate.find(';') else {
-            out.push_str(&remaining[start..]);
-            return out;
-        };
-        let entity = &entity_candidate[..end];
-        if let Some(decoded) = decode_html_entity(entity) {
-            out.push(decoded);
-        } else {
-            out.push('&');
-            out.push_str(entity);
-            out.push(';');
-        }
-        remaining = &entity_candidate[end + 1..];
-    }
-    out.push_str(remaining);
-    out
-}
-
-fn decode_html_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-            u32::from_str_radix(&entity[2..], 16)
-                .ok()
-                .and_then(char::from_u32)
-        }
-        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
-        _ => None,
-    }
 }
 
 fn fingerprint_web_page(page: &WebPage) -> SourceFingerprint {
