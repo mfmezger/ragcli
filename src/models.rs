@@ -7,6 +7,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tracing::{field, Instrument};
 
 /// Embedding client backed by Ollama's `/api/embed` endpoint.
@@ -349,6 +350,9 @@ impl VisionCaptioner {
     }
 }
 
+const MAX_RETRIES: u32 = 2;
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+
 impl HttpClient {
     fn with_timeout(timeout: Duration) -> Self {
         Self::Reqwest(
@@ -360,6 +364,23 @@ impl HttpClient {
     }
 
     async fn get_text(&self, url: String) -> Result<(reqwest::StatusCode, String)> {
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            let result = self.get_text_once(&url).await;
+            if should_retry(&result, attempt) {
+                last_err = Some(clone_result_error(&result));
+                sleep(backoff_duration(attempt)).await;
+                continue;
+            }
+            return result;
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("GET request retries exhausted")))
+    }
+
+    async fn get_text_once(
+        &self,
+        url: &str,
+    ) -> Result<(reqwest::StatusCode, String)> {
         let response = match self {
             Self::Reqwest(client) => client
                 .get(url)
@@ -367,7 +388,6 @@ impl HttpClient {
                 .await
                 .context("send HTTP GET request")?,
         };
-
         let status = response.status();
         let body = response.text().await.context("read HTTP response body")?;
         Ok((status, body))
@@ -378,21 +398,71 @@ impl HttpClient {
         url: String,
         body: serde_json::Value,
     ) -> Result<(reqwest::StatusCode, String)> {
-        let body = body.to_string();
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            let result = self.post_json_once(&url, &body).await;
+            if should_retry(&result, attempt) {
+                last_err = Some(clone_result_error(&result));
+                sleep(backoff_duration(attempt)).await;
+                continue;
+            }
+            return result;
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("POST request retries exhausted")))
+    }
+
+    async fn post_json_once(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let json_body = body.to_string();
         let response = match self {
             Self::Reqwest(client) => client
                 .post(url)
                 .header(CONTENT_TYPE, "application/json")
-                .body(body.clone())
+                .body(json_body)
                 .send()
                 .await
                 .context("send HTTP POST request")?,
         };
-
         let status = response.status();
-        let body = response.text().await.context("read HTTP response body")?;
-        Ok((status, body))
+        let response_body = response.text().await.context("read HTTP response body")?;
+        Ok((status, response_body))
     }
+}
+
+fn should_retry(result: &Result<(reqwest::StatusCode, String)>, attempt: u32) -> bool {
+    if attempt >= MAX_RETRIES {
+        return false;
+    }
+    match result {
+        Err(err) => is_connection_error(err),
+        Ok((status, _)) => status.is_server_error(),
+    }
+}
+
+fn clone_result_error(result: &Result<(reqwest::StatusCode, String)>) -> anyhow::Error {
+    match result {
+        Err(err) => anyhow::anyhow!("{err:#}"),
+        Ok((status, body)) => anyhow::anyhow!("HTTP {status}: {body}"),
+    }
+}
+
+fn backoff_duration(attempt: u32) -> Duration {
+    INITIAL_BACKOFF * 2u32.saturating_pow(attempt)
+}
+
+fn is_connection_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let msg = cause.to_string().to_ascii_lowercase();
+        msg.contains("connection refused")
+            || msg.contains("connection reset")
+            || msg.contains("broken pipe")
+            || msg.contains("connect error")
+            || msg.contains("error sending request")
+            || msg.contains("send http")
+    })
 }
 
 /// Converts a raw Ollama HTTP error into a user-friendly `anyhow::Error`.
@@ -696,5 +766,43 @@ mod tests {
             .expect("generate Ollama chat response");
 
         assert_eq!(answer, "A cat sits on a windowsill. [1]");
+    }
+
+    #[test]
+    fn test_should_retry_returns_true_for_server_errors() {
+        let result: Result<(reqwest::StatusCode, String)> =
+            Ok((reqwest::StatusCode::INTERNAL_SERVER_ERROR, "error".to_string()));
+        assert!(should_retry(&result, 0));
+        assert!(!should_retry(&result, MAX_RETRIES));
+    }
+
+    #[test]
+    fn test_should_retry_returns_false_for_client_errors() {
+        let result: Result<(reqwest::StatusCode, String)> =
+            Ok((reqwest::StatusCode::NOT_FOUND, "error".to_string()));
+        assert!(!should_retry(&result, 0));
+    }
+
+    #[test]
+    fn test_should_retry_returns_true_for_connection_errors() {
+        let result: Result<(reqwest::StatusCode, String)> =
+            Err(anyhow::anyhow!("error sending request: connection refused"));
+        assert!(should_retry(&result, 0));
+    }
+
+    #[test]
+    fn test_backoff_duration_doubles_each_attempt() {
+        assert_eq!(backoff_duration(0), Duration::from_millis(500));
+        assert_eq!(backoff_duration(1), Duration::from_millis(1000));
+        assert_eq!(backoff_duration(2), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn test_is_connection_error_detects_known_patterns() {
+        assert!(is_connection_error(&anyhow::anyhow!("connection refused")));
+        assert!(is_connection_error(&anyhow::anyhow!("connection reset by peer")));
+        assert!(is_connection_error(&anyhow::anyhow!("broken pipe")));
+        assert!(is_connection_error(&anyhow::anyhow!("Error sending request")));
+        assert!(!is_connection_error(&anyhow::anyhow!("model not found")));
     }
 }
