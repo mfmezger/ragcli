@@ -153,7 +153,7 @@ impl Embedder {
                 .await
                 .context("call Ollama embed API")?;
             if !status.is_success() {
-                anyhow::bail!("Ollama embed API error: {} - {}", status, body);
+                return Err(ollama_error("embed", status, &body, &self.model));
             }
 
             let parsed: EmbedResponse =
@@ -259,7 +259,7 @@ impl Generator {
                 .await
                 .context("call Ollama chat API")?;
             if !status.is_success() {
-                anyhow::bail!("Ollama chat API error: {} - {}", status, body);
+                return Err(ollama_error("chat", status, &body, &self.model));
             }
 
             let parsed: ChatResponse =
@@ -330,7 +330,7 @@ impl VisionCaptioner {
                 .await
                 .context("call Ollama vision chat API")?;
             if !status.is_success() {
-                anyhow::bail!("Ollama vision API error: {} - {}", status, body);
+                return Err(ollama_error("vision", status, &body, &self.model));
             }
 
             let parsed: ChatResponse =
@@ -395,6 +395,42 @@ impl HttpClient {
     }
 }
 
+/// Converts a raw Ollama HTTP error into a user-friendly `anyhow::Error`.
+///
+/// When the response body signals that the requested model is not installed,
+/// the returned error includes the exact `ollama pull <model>` command the
+/// user needs to run and a tip to use `ragcli doctor` to audit all configured
+/// models at once.  All other errors fall back to a compact representation of
+/// the HTTP status and body.
+fn ollama_error(
+    operation: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+    model: &str,
+) -> anyhow::Error {
+    // Ollama returns {"error": "model 'x' not found, try pulling it first"}
+    // when the model has never been pulled.
+    let ollama_msg = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error")?.as_str().map(str::to_owned));
+
+    if let Some(msg) = ollama_msg {
+        let lower = msg.to_lowercase();
+        if lower.contains("not found") || lower.contains("try pulling") {
+            return anyhow::anyhow!(
+                "Ollama model '{}' is not installed.\n  \
+                 Install it with: ollama pull {}\n  \
+                 Run 'ragcli doctor' to check the status of all configured models.",
+                model,
+                model,
+            );
+        }
+        return anyhow::anyhow!("Ollama {} API error: {} - {}", operation, status, msg);
+    }
+
+    anyhow::anyhow!("Ollama {} API error: {} - {}", operation, status, body)
+}
+
 fn endpoint_host(base_url: &str) -> String {
     reqwest::Url::parse(base_url)
         .ok()
@@ -444,6 +480,118 @@ mod tests {
         });
 
         format!("http://{}", addr)
+    }
+
+    #[test]
+    fn test_ollama_error_model_not_found_suggests_pull_command() {
+        let err = ollama_error(
+            "embed",
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"model 'nomic-embed-text:latest' not found, try pulling it first"}"#,
+            "nomic-embed-text:latest",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("is not installed"),
+            "expected 'is not installed' in: {msg}"
+        );
+        assert!(
+            msg.contains("ollama pull nomic-embed-text:latest"),
+            "expected pull command in: {msg}"
+        );
+        assert!(
+            msg.contains("ragcli doctor"),
+            "expected doctor hint in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_ollama_error_model_not_found_via_try_pulling_phrase() {
+        // Some Ollama versions vary the exact wording; ensure the 'try pulling' phrase
+        // also triggers the friendly path.
+        let err = ollama_error(
+            "chat",
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"try pulling the model first"}"#,
+            "llama3:latest",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ollama pull llama3:latest"),
+            "expected pull command in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_ollama_error_generic_json_error_preserves_message() {
+        let err = ollama_error(
+            "chat",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"out of memory"}"#,
+            "llama3:latest",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("out of memory"),
+            "expected original message in: {msg}"
+        );
+        assert!(
+            !msg.contains("ollama pull"),
+            "should not suggest pull for unrelated errors: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_ollama_error_non_json_body_falls_back_to_raw() {
+        let err = ollama_error(
+            "vision",
+            reqwest::StatusCode::BAD_GATEWAY,
+            "Bad Gateway",
+            "llava:latest",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("Bad Gateway"), "expected raw body in: {msg}");
+        assert!(msg.contains("502"), "expected status code in: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_embed_returns_friendly_error_when_model_not_found() {
+        let base_url = one_shot_server(
+            "404 Not Found",
+            r#"{"error":"model 'nomic-embed-text:latest' not found, try pulling it first"}"#,
+        );
+        let embedder = Embedder::new(base_url, "nomic-embed-text:latest".to_string());
+        let err = embedder.embed("hello").await.unwrap_err().to_string();
+        assert!(
+            err.contains("is not installed"),
+            "expected friendly message in: {err}"
+        );
+        assert!(
+            err.contains("ollama pull"),
+            "expected pull command in: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_answer_returns_friendly_error_when_model_not_found() {
+        let base_url = one_shot_server(
+            "404 Not Found",
+            r#"{"error":"model 'llama3:latest' not found, try pulling it first"}"#,
+        );
+        let generator = Generator::new(base_url, "llama3:latest".to_string());
+        let err = generator
+            .generate_answer(&[], "test", 64)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("is not installed"),
+            "expected friendly message in: {err}"
+        );
+        assert!(
+            err.contains("ollama pull"),
+            "expected pull command in: {err}"
+        );
     }
 
     #[test]
