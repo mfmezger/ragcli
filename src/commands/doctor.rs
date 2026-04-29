@@ -7,6 +7,7 @@ use crate::telemetry::{TelemetryConfig, TelemetryStatus};
 use anyhow::{Context, Result};
 use console::style;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
@@ -255,6 +256,130 @@ fn print_human(report: &DoctorReport) {
             col = col
         );
     }
+
+    print_hints(report);
+}
+
+fn print_hints(report: &DoctorReport) {
+    let hints = doctor_hints(report);
+    if hints.is_empty() {
+        return;
+    }
+
+    println!();
+    section("Hints");
+    for hint in hints {
+        println!("  {} {}", style("→").yellow().bold(), style(hint).yellow());
+    }
+}
+
+fn doctor_hints(report: &DoctorReport) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if report.base.status != "exists"
+        || report.store.status != "exists"
+        || report.config.status != "exists"
+        || report
+            .subdirectories
+            .iter()
+            .any(|sub| sub.status != "exists")
+    {
+        hints.push(format!(
+            "Store layout is incomplete. Run `ragcli doctor` again; if it stays missing, check write permissions under `{}`.",
+            report.store.path
+        ));
+    }
+
+    if report.metadata_error.is_some() {
+        hints.push(format!(
+            "Fix metadata access at `{}`; it should be a readable file, not a directory.",
+            report.metadata.path
+        ));
+    } else if report.metadata.status != "exists" {
+        hints.push(
+            "No indexed metadata found yet. Run `ragcli index <path>` before querying.".to_string(),
+        );
+    }
+
+    if report.ollama_reachable {
+        if let Some(installed_models) = &report.installed_models {
+            hints.extend(model_install_hints(report, installed_models));
+        }
+    } else {
+        hints.push(format!(
+            "Start Ollama with `ollama serve`, or set the correct URL with `RAGCLI_OLLAMA_URL` / `ragcli config set ollama.base_url <url>` (current: {}).",
+            report.ollama_url
+        ));
+        hints.push(
+            "After Ollama is reachable, rerun `ragcli doctor` to verify configured models."
+                .to_string(),
+        );
+    }
+
+    if report.telemetry_error.is_some() {
+        hints.push(
+            "Fix telemetry environment variables, or unset OTEL_EXPORTER_OTLP_* to disable telemetry."
+                .to_string(),
+        );
+    } else if !report.telemetry.enabled {
+        hints.push(
+            "Telemetry is optional. For local traces, run Arize Phoenix and set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006`; for managed tracing like Logfire or Phoenix Cloud, set that provider's OTLP endpoint and headers."
+                .to_string(),
+        );
+    } else if !report.telemetry.headers_configured {
+        hints.push(
+            "Telemetry export is enabled. Local collectors usually do not need headers; managed services like Logfire or Phoenix Cloud usually require `OTEL_EXPORTER_OTLP_HEADERS`."
+                .to_string(),
+        );
+    }
+
+    hints
+}
+
+fn model_install_hints(
+    report: &DoctorReport,
+    installed_models: &ModelInstallReport,
+) -> Vec<String> {
+    let mut missing_by_model: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let configured = [
+        (
+            "embed",
+            report.embed_model.as_str(),
+            installed_models.embed_model_installed,
+        ),
+        (
+            "chat",
+            report.chat_model.as_str(),
+            installed_models.chat_model_installed,
+        ),
+        (
+            "vision",
+            report.vision_model.as_str(),
+            installed_models.vision_model_installed,
+        ),
+    ];
+
+    for (role, model, installed) in configured {
+        if !installed {
+            missing_by_model.entry(model).or_default().push(role);
+        }
+    }
+
+    missing_by_model
+        .into_iter()
+        .map(|(model, roles)| {
+            format!(
+                "Install the {} model for {}: `ollama pull {}`.",
+                if roles.len() == 1 {
+                    "missing"
+                } else {
+                    "shared"
+                },
+                roles.join("/"),
+                model
+            )
+        })
+        .collect()
 }
 
 /// Print a bold cyan section header.
