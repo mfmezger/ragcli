@@ -453,7 +453,7 @@ impl SectionBox {
         // Do not cap to terminal width here: rows are already styled strings, and
         // truncating them risks cutting ANSI escape sequences while still leaving
         // long paths, metadata summaries, and hints outside the right border.
-        let box_width = (max_row_visual + 4).max(title_visual + 6).max(42);
+        let box_width = (max_row_visual + 4).max(title_visual + 6).max(MIN_BOX_WIDTH);
         let inner_width = box_width - 4;
 
         // Top border  ╭─ Title ─────────────────────╮
