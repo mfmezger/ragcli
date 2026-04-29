@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+const MIN_BOX_WIDTH: usize = 48;
+const MAX_PROSE_WIDTH: usize = 104;
+
 #[derive(Debug, Serialize)]
 pub struct PathStatusReport {
     pub path: String,
@@ -170,11 +173,9 @@ fn print_human(report: &DoctorReport) {
         ));
     }
     if let Some(summary) = &report.metadata_summary {
-        paths_box.push(format!(
-            "  {:<8}  {}",
-            style("summary").dim(),
-            style(summary).dim()
-        ));
+        for row in wrapped_dim_rows("summary", summary, 8, MAX_PROSE_WIDTH) {
+            paths_box.push(row);
+        }
     }
     paths_box.render();
     println!();
@@ -275,11 +276,10 @@ fn print_human(report: &DoctorReport) {
             err("missing")
         };
         layout_box.push(format!(
-            "  {:<col$}  {}  {}",
-            style(&sub.name).bold(),
+            "  {}  {}  {}",
+            style(format!("{:<col$}", sub.name)).bold(),
             style(&sub.path).dim(),
             status_str,
-            col = col
         ));
     }
     layout_box.render();
@@ -296,11 +296,9 @@ fn print_hints(report: &DoctorReport) {
     println!();
     let mut hints_box = SectionBox::new("Hints");
     for hint in hints {
-        hints_box.push(format!(
-            "  {} {}",
-            style("→").yellow().bold(),
-            style(&hint).yellow()
-        ));
+        for row in wrapped_hint_rows(&hint, MAX_PROSE_WIDTH) {
+            hints_box.push(row);
+        }
     }
     hints_box.render();
 }
@@ -453,7 +451,9 @@ impl SectionBox {
         // Do not cap to terminal width here: rows are already styled strings, and
         // truncating them risks cutting ANSI escape sequences while still leaving
         // long paths, metadata summaries, and hints outside the right border.
-        let box_width = (max_row_visual + 4).max(title_visual + 6).max(MIN_BOX_WIDTH);
+        let box_width = (max_row_visual + 4)
+            .max(title_visual + 6)
+            .max(MIN_BOX_WIDTH);
         let inner_width = box_width - 4;
 
         // Top border  ╭─ Title ─────────────────────╮
@@ -478,7 +478,7 @@ impl SectionBox {
 
 /// Build a plain key/value row string with aligned padding.
 fn kv_str(label: &str, value: &str, width: usize) -> String {
-    format!("  {:<width$}  {}", style(label).dim(), value, width = width)
+    format!("  {}  {}", style(format!("{label:<width$}")).dim(), value)
 }
 
 /// Build a path row string: label  path  ✓/✗ status.
@@ -489,11 +489,10 @@ fn path_row_str(label: &str, report: &PathStatusReport, width: usize) -> String 
         err("missing")
     };
     format!(
-        "  {:<width$}  {}  {}",
-        style(label).dim(),
+        "  {}  {}  {}",
+        style(format!("{label:<width$}")).dim(),
         style(&report.path).dim(),
         status_str,
-        width = width
     )
 }
 
@@ -505,12 +504,76 @@ fn model_row_str(label: &str, model: &str, installed: bool, width: usize) -> Str
         err("not installed")
     };
     format!(
-        "  {:<width$}  {:<30}  {}",
-        style(label).dim(),
+        "  {}  {:<30}  {}",
+        style(format!("{label:<width$}")).dim(),
         model,
         status_str,
-        width = width
     )
+}
+
+fn wrapped_dim_rows(
+    label: &str,
+    text: &str,
+    label_width: usize,
+    value_width: usize,
+) -> Vec<String> {
+    wrap_words(text, value_width)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let label = if idx == 0 { label } else { "" };
+            format!(
+                "  {}  {}",
+                style(format!("{label:<label_width$}")).dim(),
+                style(line).dim()
+            )
+        })
+        .collect()
+}
+
+fn wrapped_hint_rows(hint: &str, width: usize) -> Vec<String> {
+    wrap_words(hint, width)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            if idx == 0 {
+                format!("  {} {}", style("→").yellow().bold(), style(line).yellow())
+            } else {
+                format!("    {}", style(line).yellow())
+            }
+        })
+        .collect()
+}
+
+fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+            continue;
+        }
+
+        let next_width = measure_text_width(&current) + 1 + measure_text_width(word);
+        if next_width > max_width {
+            lines.push(current);
+            current = word.to_string();
+        } else {
+            current.push(' ');
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
 }
 
 /// Green ✓ prefix with text.
