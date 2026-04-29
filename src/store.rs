@@ -254,18 +254,8 @@ pub async fn load_source_fingerprints(
 
     let mut fingerprints = BTreeMap::new();
     while let Some(batch) = stream.try_next().await? {
-        let source_col = batch
-            .column_by_name("source_path")
-            .context("source_path column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("source_path column type")?;
-        let metadata_col = batch
-            .column_by_name("metadata")
-            .context("metadata column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("metadata column type")?;
+        let source_col = string_col(&batch, "source_path")?;
+        let metadata_col = string_col(&batch, "metadata")?;
 
         for row_idx in 0..batch.num_rows() {
             let source = source_col.value(row_idx);
@@ -564,18 +554,8 @@ pub fn build_retrieval_filter(
 pub fn extract_contexts(batches: &[RecordBatch]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for batch in batches {
-        let text_col = batch
-            .column_by_name("chunk_text")
-            .context("chunk_text column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("chunk_text column type")?;
-        let source_col = batch
-            .column_by_name("source_path")
-            .context("source_path column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("source_path column type")?;
+        let text_col = string_col(batch, "chunk_text")?;
+        let source_col = string_col(batch, "source_path")?;
         for i in 0..batch.num_rows() {
             out.push(format!(
                 "Source: {}\n{}",
@@ -605,30 +585,10 @@ fn accumulate_indexed_source_summaries(
     pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
     batch: &RecordBatch,
 ) -> Result<()> {
-    let source_col = batch
-        .column_by_name("source_path")
-        .context("source_path column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("source_path column type")?;
-    let page_col = batch
-        .column_by_name("page")
-        .context("page column missing")?
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .context("page column type")?;
-    let format_col = batch
-        .column_by_name("format")
-        .context("format column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("format column type")?;
-    let metadata_col = batch
-        .column_by_name("metadata")
-        .context("metadata column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("metadata column type")?;
+    let source_col = string_col(batch, "source_path")?;
+    let page_col = int32_col(batch, "page")?;
+    let format_col = string_col(batch, "format")?;
+    let metadata_col = string_col(batch, "metadata")?;
 
     for i in 0..batch.num_rows() {
         let source = source_col.value(i);
@@ -684,30 +644,10 @@ fn accumulate_indexed_sources(
     pages_by_source: &mut BTreeMap<String, BTreeSet<i32>>,
     batch: &RecordBatch,
 ) -> Result<()> {
-    let text_col = batch
-        .column_by_name("chunk_text")
-        .context("chunk_text column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("chunk_text column type")?;
-    let source_col = batch
-        .column_by_name("source_path")
-        .context("source_path column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("source_path column type")?;
-    let page_col = batch
-        .column_by_name("page")
-        .context("page column missing")?
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .context("page column type")?;
-    let format_col = batch
-        .column_by_name("format")
-        .context("format column missing")?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("format column type")?;
+    let text_col = string_col(batch, "chunk_text")?;
+    let source_col = string_col(batch, "source_path")?;
+    let page_col = int32_col(batch, "page")?;
+    let format_col = string_col(batch, "format")?;
 
     for i in 0..batch.num_rows() {
         let source = source_col.value(i);
@@ -755,24 +695,9 @@ pub fn collect_store_stats(batches: &[RecordBatch], top_n: usize) -> Result<Stor
     let mut pdf_pages = BTreeSet::new();
 
     for batch in batches {
-        let text_col = batch
-            .column_by_name("chunk_text")
-            .context("chunk_text column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("chunk_text column type")?;
-        let source_col = batch
-            .column_by_name("source_path")
-            .context("source_path column missing")?
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .context("source_path column type")?;
-        let page_col = batch
-            .column_by_name("page")
-            .context("page column missing")?
-            .as_any()
-            .downcast_ref::<Int32Array>()
-            .context("page column type")?;
+        let text_col = string_col(batch, "chunk_text")?;
+        let source_col = string_col(batch, "source_path")?;
+        let page_col = int32_col(batch, "page")?;
         let mut current_source = None;
         let mut current_kind = SourceKind::Unsupported;
 
@@ -850,6 +775,24 @@ pub fn strip_thinking(text: &str) -> String {
         return out;
     }
     text.to_string()
+}
+
+fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("{name} column missing"))?
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .with_context(|| format!("{name} column type"))
+}
+
+fn int32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
+    batch
+        .column_by_name(name)
+        .with_context(|| format!("{name} column missing"))?
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .with_context(|| format!("{name} column type"))
 }
 
 fn build_source_delete_filter(source_paths: &[String]) -> Option<String> {
