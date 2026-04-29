@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use arrow_array::{Float32Array, Float64Array, Int32Array, RecordBatch, StringArray};
 use futures::TryStreamExt;
 use lancedb::index::scalar::FullTextSearchQuery;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{QueryBase, QueryExecutionOptions};
 use tracing::{field, Instrument};
 
 use super::rerank::rerank_candidates;
@@ -105,7 +105,11 @@ async fn retrieve_candidates_for_query(
             query = query.only_if(filter);
         }
 
-        let batches: Vec<RecordBatch> = query.execute().await?.try_collect::<Vec<_>>().await?;
+        let batches: Vec<RecordBatch> = query
+            .execute_hybrid(QueryExecutionOptions::default())
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
         span_inner.record("batch_count", batches.len());
         let hits = extract_candidates(&batches)?;
         span_inner.record("hit_count", hits.len());
@@ -145,8 +149,13 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
             .and_then(|column| column.as_any().downcast_ref::<Int32Array>());
 
         for row in 0..batch.num_rows() {
-            let vector_score = vector_score_at(batch, row);
-            let fused_score = relevance_score_at(batch, row).or(vector_score);
+            let fused_score = hybrid_relevance_score_at(batch, row);
+            let vector_score = vector_score_at(batch, row, fused_score.is_some());
+            let keyword_score = if fused_score.is_some() {
+                None
+            } else {
+                raw_score_at(batch, row)
+            };
             hits.push(RetrievalCandidate {
                 id: id_col
                     .map(|column| column.value(row).to_string())
@@ -161,8 +170,8 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
                     .map(|column| column.value(row))
                     .unwrap_or_default(),
                 vector_score,
-                keyword_score: relevance_score_at(batch, row),
-                fused_score,
+                keyword_score,
+                fused_score: fused_score.or(vector_score).or(keyword_score),
                 rerank_score: None,
             });
         }
@@ -171,34 +180,37 @@ fn extract_candidates(batches: &[RecordBatch]) -> Result<Vec<RetrievalCandidate>
     Ok(hits)
 }
 
-fn relevance_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
-    for name in ["_score", "score"] {
-        let column = batch.column_by_name(name)?;
-        if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
-            return Some(values.value(row));
-        }
-        if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
-            return Some(values.value(row) as f32);
-        }
-    }
-    None
+fn hybrid_relevance_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
+    numeric_column_value(batch, row, "_relevance_score")
 }
 
-fn vector_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
-    if let Some(score) = relevance_score_at(batch, row) {
-        return Some(score);
+fn raw_score_at(batch: &RecordBatch, row: usize) -> Option<f32> {
+    ["_score", "score"]
+        .into_iter()
+        .find_map(|name| numeric_column_value(batch, row, name))
+}
+
+fn vector_score_at(batch: &RecordBatch, row: usize, has_hybrid_relevance: bool) -> Option<f32> {
+    for name in ["_distance", "distance"] {
+        if let Some(distance) = numeric_column_value(batch, row, name) {
+            return Some(distance_to_similarity(distance));
+        }
     }
 
-    for name in ["_distance", "distance"] {
-        let column = batch.column_by_name(name)?;
-        let distance = if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
-            values.value(row)
-        } else if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
-            values.value(row) as f32
-        } else {
-            continue;
-        };
-        return Some(distance_to_similarity(distance));
+    if has_hybrid_relevance {
+        return None;
+    }
+
+    raw_score_at(batch, row)
+}
+
+fn numeric_column_value(batch: &RecordBatch, row: usize, name: &str) -> Option<f32> {
+    let column = batch.column_by_name(name)?;
+    if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
+        return Some(values.value(row));
+    }
+    if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
+        return Some(values.value(row) as f32);
     }
     None
 }
@@ -210,9 +222,43 @@ fn distance_to_similarity(distance: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{Float32Array, Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     #[test]
     fn test_distance_to_similarity_makes_smaller_distances_score_higher() {
         assert!(distance_to_similarity(0.2) > distance_to_similarity(0.8));
+    }
+
+    #[test]
+    fn test_extract_candidates_prefers_hybrid_relevance_over_raw_score() {
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("source_path", DataType::Utf8, false),
+                Field::new("chunk_text", DataType::Utf8, false),
+                Field::new("page", DataType::Int32, false),
+                Field::new("chunk_index", DataType::Int32, false),
+                Field::new("_score", DataType::Float32, true),
+                Field::new("_relevance_score", DataType::Float32, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from_iter_values(["docs/totoro.md"])),
+                Arc::new(StringArray::from_iter_values([
+                    "Chibi Totoro and Chu Totoro",
+                ])),
+                Arc::new(Int32Array::from_iter_values([3])),
+                Arc::new(Int32Array::from_iter_values([0])),
+                Arc::new(Float32Array::from_iter_values([0.000001])),
+                Arc::new(Float32Array::from_iter_values([0.032795697])),
+            ],
+        )
+        .unwrap();
+
+        let candidates = extract_candidates(&[batch]).unwrap();
+
+        assert_eq!(candidates[0].fused_score, Some(0.032795697));
+        assert_eq!(candidates[0].keyword_score, None);
+        assert_eq!(candidates[0].vector_score, None);
     }
 }

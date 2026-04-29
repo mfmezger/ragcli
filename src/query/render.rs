@@ -4,6 +4,10 @@ use crate::commands::query::QueryCommand;
 use crate::retrieval::RetrievalCandidate;
 use crate::ui::{self, Panel};
 
+const CONTEXT_PREVIEW_CHARS: usize = 700;
+const CONTEXT_WRAP_WIDTH: usize = 96;
+const CONTEXT_LABEL_WIDTH: usize = 9;
+
 use super::runtime::mode_label;
 use super::types::QueryResult;
 
@@ -117,15 +121,71 @@ pub(crate) fn print_contexts(command: &QueryCommand, result: &QueryResult) {
 
     let mut panel = Panel::new("Retrieved context:");
     for (idx, hit) in result.hits.iter().enumerate() {
-        let compact = retrieval_context(hit).replace('\n', " ");
-        let preview: String = compact.chars().take(220).collect();
-        panel.prose(&format!("[{}]", idx + 1), &preview, 5);
+        if idx > 0 {
+            panel.push("");
+        }
+        panel.prose(
+            &format!("[{}]", idx + 1),
+            &retrieval_context_heading(hit),
+            CONTEXT_LABEL_WIDTH,
+        );
+        push_context_preview(&mut panel, &hit.chunk_text);
     }
     panel.render();
 }
 
-fn retrieval_context(hit: &RetrievalCandidate) -> String {
-    format!("Source: {}\n{}", hit.source_path, hit.chunk_text)
+fn retrieval_context_heading(hit: &RetrievalCandidate) -> String {
+    let mut parts = vec![format!("source={}", hit.source_path)];
+    if hit.page > 0 {
+        parts.push(format!("page={}", hit.page));
+    }
+    parts.push(format!("chunk={}", hit.chunk_index));
+    if let Some(score) = hit.best_score() {
+        parts.push(format!("score={score:.6}"));
+    }
+    parts.join(" · ")
+}
+
+fn push_context_preview(panel: &mut Panel, text: &str) {
+    let (preview, truncated) = context_preview(text);
+    let mut first_line = true;
+
+    for line in preview.lines() {
+        let label = if first_line { "snippet" } else { "" };
+        for row in ui::wrapped_dim_rows(
+            label,
+            line.trim_end(),
+            CONTEXT_LABEL_WIDTH,
+            CONTEXT_WRAP_WIDTH,
+        ) {
+            panel.push(row);
+        }
+        first_line = false;
+    }
+
+    if first_line {
+        for row in ui::wrapped_dim_rows("snippet", "", CONTEXT_LABEL_WIDTH, CONTEXT_WRAP_WIDTH) {
+            panel.push(row);
+        }
+    }
+
+    if truncated {
+        panel.prose(
+            "",
+            "… truncated; increase top-k or inspect the source for full text",
+            CONTEXT_LABEL_WIDTH,
+        );
+    }
+}
+
+fn context_preview(text: &str) -> (String, bool) {
+    let trimmed = text.trim();
+    let mut preview: String = trimmed.chars().take(CONTEXT_PREVIEW_CHARS).collect();
+    let truncated = trimmed.chars().count() > CONTEXT_PREVIEW_CHARS;
+    if truncated {
+        preview.push('…');
+    }
+    (preview, truncated)
 }
 
 fn enabled(value: bool) -> String {
@@ -166,5 +226,60 @@ fn strategy_label(plan: &QueryPlan) -> &'static str {
         RetrievalStrategy::Rewrite => "Rewrite",
         RetrievalStrategy::Decompose => "Decompose",
         RetrievalStrategy::BroadThenRerank => "BroadThenRerank",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(source_path: &str, page: i32, chunk_index: i32) -> RetrievalCandidate {
+        RetrievalCandidate {
+            id: String::new(),
+            source_path: source_path.to_string(),
+            chunk_text: "alpha\nbeta".to_string(),
+            metadata: String::new(),
+            page,
+            chunk_index,
+            vector_score: Some(0.42),
+            keyword_score: None,
+            fused_score: Some(0.1234567),
+            rerank_score: None,
+        }
+    }
+
+    #[test]
+    fn test_retrieval_context_heading_includes_location_and_score() {
+        let heading = retrieval_context_heading(&candidate("docs/guide.md", 3, 7));
+
+        assert_eq!(
+            heading,
+            "source=docs/guide.md · page=3 · chunk=7 · score=0.123457"
+        );
+    }
+
+    #[test]
+    fn test_retrieval_context_heading_omits_page_when_absent() {
+        let heading = retrieval_context_heading(&candidate("src/main.rs", 0, 2));
+
+        assert_eq!(heading, "source=src/main.rs · chunk=2 · score=0.123457");
+    }
+
+    #[test]
+    fn test_context_preview_trims_and_marks_truncation() {
+        let input = format!("  {}  ", "x".repeat(CONTEXT_PREVIEW_CHARS + 1));
+        let (preview, truncated) = context_preview(&input);
+
+        assert!(truncated);
+        assert_eq!(preview.chars().count(), CONTEXT_PREVIEW_CHARS + 1);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn test_context_preview_preserves_short_multiline_text() {
+        let (preview, truncated) = context_preview(" alpha\nbeta ");
+
+        assert!(!truncated);
+        assert_eq!(preview, "alpha\nbeta");
     }
 }

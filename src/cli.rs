@@ -71,7 +71,7 @@ pub enum Command {
         #[arg(long, default_value = "hybrid")]
         mode: QueryModeArg,
         /// Number of results to retrieve before generation.
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 8)]
         top_k: usize,
         /// Number of candidates to overfetch before later pruning or reranking.
         #[arg(long, default_value_t = 20)]

@@ -17,8 +17,15 @@ struct RerankPayload {
 
 #[derive(Debug, serde::Deserialize)]
 struct RerankItem {
-    id: String,
+    id: RerankId,
     score: f32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum RerankId {
+    String(String),
+    Number(usize),
 }
 
 pub(crate) async fn rerank_candidates(
@@ -142,7 +149,10 @@ fn parse_rerank_payload(raw: &str) -> Result<Vec<(usize, f32)>> {
         .ranked_ids
         .into_iter()
         .filter_map(|item| {
-            let id = item.id.trim().parse::<usize>().ok()?;
+            let id = match item.id {
+                RerankId::String(id) => id.trim().parse::<usize>().ok()?,
+                RerankId::Number(id) => id,
+            };
             Some((id, item.score))
         })
         .collect())
@@ -181,6 +191,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(ranked, vec![(1, 0.9), (2, 0.3)]);
+    }
+
+    #[test]
+    fn test_parse_rerank_payload_accepts_numeric_ids() {
+        let ranked =
+            parse_rerank_payload(r#"{"ranked_ids":[{"id":7,"score":0.9},{"id":"2","score":0.3}]}"#)
+                .unwrap();
+
+        assert_eq!(ranked, vec![(7, 0.9), (2, 0.3)]);
     }
 
     #[test]
