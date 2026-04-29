@@ -11,6 +11,7 @@ use crate::models::Generator;
 use crate::retrieval::{merge_candidates, prune_candidates, RetrievalCandidate};
 use crate::rewrite::{rewrite_query_for_retrieval, QueryRewriteSet};
 use crate::store;
+use crate::ui::Panel;
 use anyhow::Result;
 use std::collections::BTreeSet;
 use tracing::{field, Instrument};
@@ -59,7 +60,9 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
         span_inner.record("iteration_count", result.iterations.len());
 
         if result.hits.is_empty() {
-            println!("No relevant context found in the local store.");
+            let mut panel = Panel::new("Query Result");
+            panel.kv("status", "No relevant context found in the local store.", 8);
+            panel.render();
             return Ok(());
         }
 
@@ -74,7 +77,9 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
             None => generate_answer(&runtime, &command, &result).await?,
         };
         println!();
-        println!("{}", store::strip_thinking(&answer).trim());
+        let mut panel = Panel::new("Answer");
+        panel.prose("", store::strip_thinking(&answer).trim(), 0);
+        panel.render();
         Ok(())
     }
     .instrument(span)

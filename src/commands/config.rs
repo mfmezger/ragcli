@@ -2,6 +2,7 @@ use crate::config::{
     self, ensure_store_layout, load_or_create_config_with_sources, load_or_create_file_config,
     save_config, store_dir, Config, ConfigSources,
 };
+use crate::ui::{self, Panel};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -40,16 +41,27 @@ fn build_show_report(name: Option<&str>) -> Result<ConfigShowReport> {
 }
 
 fn print_show_human(report: &ConfigShowReport) -> Result<()> {
-    println!("Store: {}", report.store);
-    println!("Config: {}", report.config_path);
+    ui::command_header("ragcli config show", "");
+
+    let mut location = Panel::new("Config Location");
+    location.kv("store", &report.store, 6);
+    location.kv("file", &report.config_path, 6);
+    location.render();
+
     println!();
-    println!("{}", toml::to_string_pretty(&report.config)?);
+    let mut config = Panel::new("Config");
+    for line in toml::to_string_pretty(&report.config)?.lines() {
+        config.push(format!("  {line}"));
+    }
+    config.render();
 
     if !report.active_overrides.is_empty() {
-        println!("Active environment overrides:");
+        println!();
+        let mut overrides = Panel::new("Active Environment Overrides");
         for override_entry in &report.active_overrides {
-            println!("  {}", override_entry);
+            overrides.prose("env", override_entry, 4);
         }
+        overrides.render();
     }
 
     Ok(())
@@ -62,8 +74,12 @@ pub async fn set(name: Option<&str>, key: String, value: String) -> Result<()> {
     cfg.set_path(&key, &value)?;
     save_config(&store, &cfg)?;
 
-    println!("Updated {}", config::config_path(&store).display());
-    println!("  {} = {}", key, value);
+    let mut panel = Panel::new("Config Updated");
+    panel.kv("file", config::config_path(&store).display().to_string(), 6);
+    panel.kv("key", key, 6);
+    panel.kv("value", value, 6);
+    panel.kv("status", ui::ok("saved"), 6);
+    panel.render();
     Ok(())
 }
 

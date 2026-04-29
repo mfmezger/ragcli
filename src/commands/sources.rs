@@ -1,6 +1,7 @@
 use crate::commands::stat::fmt_count;
 use crate::config::{ensure_store_layout, store_dir};
 use crate::store::{connect_db, list_indexed_sources, IndexedSource};
+use crate::ui::{self, Panel};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -35,28 +36,41 @@ async fn build_report(name: Option<&str>) -> Result<SourcesReport> {
 }
 
 fn print_human(report: &SourcesReport) {
-    println!("Indexed sources");
-    println!("  store: {}", report.store);
-    println!("  sources: {}", report.total_sources);
+    ui::command_header("ragcli sources", "");
 
+    let mut summary = Panel::new("Indexed Sources");
+    summary.kv("store", &report.store, 8);
+    summary.kv("sources", report.total_sources.to_string(), 8);
     if report.sources.is_empty() {
-        println!("  no indexed sources");
+        summary.kv("status", ui::warn("no indexed sources"), 8);
+        summary.render();
         return;
     }
+    summary.render();
 
-    for source in &report.sources {
-        let mut details = vec![
-            source.format.clone(),
-            format!("{} chunks", fmt_count(source.chunks)),
-            format!("~{} tokens", fmt_count(source.estimated_tokens)),
-            format!("{} chars", fmt_count(source.chars)),
-        ];
-        if source.page_count > 0 {
-            details.push(format!("{} pages", fmt_count(source.page_count)));
-        }
-
-        println!("    - {}  [{}]", source.source_path, details.join(", "));
-    }
+    println!();
+    ui::render_table(
+        "Sources",
+        &["Source", "Format", "Chunks", "Tokens", "Chars", "Pages"],
+        report
+            .sources
+            .iter()
+            .map(|source| {
+                vec![
+                    source.source_path.clone(),
+                    source.format.clone(),
+                    fmt_count(source.chunks),
+                    format!("~{}", fmt_count(source.estimated_tokens)),
+                    fmt_count(source.chars),
+                    if source.page_count > 0 {
+                        fmt_count(source.page_count)
+                    } else {
+                        "-".to_string()
+                    },
+                ]
+            })
+            .collect(),
+    );
 }
 
 #[cfg(test)]
