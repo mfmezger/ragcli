@@ -45,6 +45,7 @@ pub struct IngestResult {
 
 const MIN_CONTEXT_RETRY_CHARS: usize = 8;
 const WEB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const WEB_MAX_BODY_BYTES: u64 = 5 * 1024 * 1024;
 const WEB_USER_AGENT: &str = "ragcli/0.1";
 
 #[derive(Debug, Clone)]
@@ -730,7 +731,13 @@ async fn fetch_web_page(url: Url) -> Result<WebPage> {
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
-    let body = response.text().await.context("read web page body")?;
+    validate_web_response_headers(
+        &final_url,
+        content_type.as_deref(),
+        response.content_length(),
+    )?;
+
+    let body = read_limited_response_body(response).await?;
     let title = extract_html_title(&body);
     let text = if content_type
         .as_deref()
@@ -755,6 +762,51 @@ async fn fetch_web_page(url: Url) -> Result<WebPage> {
     })
 }
 
+fn validate_web_response_headers(
+    url: &str,
+    content_type: Option<&str>,
+    content_length: Option<u64>,
+) -> Result<()> {
+    if let Some(content_type) = content_type {
+        let content_type = content_type.to_ascii_lowercase();
+        let media_type = content_type.split(';').next().unwrap_or("").trim();
+        if !matches!(
+            media_type,
+            "text/html" | "text/plain" | "application/xhtml+xml"
+        ) {
+            anyhow::bail!("unsupported web content type for {url}: {media_type}");
+        }
+    }
+
+    if let Some(content_length) = content_length {
+        if content_length > WEB_MAX_BODY_BYTES {
+            anyhow::bail!(
+                "web page too large for {url}: {} bytes exceeds {} byte limit",
+                content_length,
+                WEB_MAX_BODY_BYTES
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn read_limited_response_body(mut response: reqwest::Response) -> Result<String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.context("read web page body")? {
+        if body.len() as u64 + chunk.len() as u64 > WEB_MAX_BODY_BYTES {
+            anyhow::bail!(
+                "web page body exceeds {} byte limit while reading {}",
+                WEB_MAX_BODY_BYTES,
+                response.url()
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 fn render_html_text(html: &str) -> Result<String> {
     let rendered =
         html2text::from_read(html.as_bytes(), usize::MAX).context("render html as text")?;
@@ -762,16 +814,74 @@ fn render_html_text(html: &str) -> Result<String> {
 }
 
 fn extract_html_title(html: &str) -> Option<String> {
-    let lower = html.to_ascii_lowercase();
+    let without_comments = strip_html_comments(html);
+    let lower = without_comments.to_ascii_lowercase();
     let start = lower.find("<title")?;
-    let after_start = &html[start..];
+    let after_start = &without_comments[start..];
     let title_body_start = after_start.find('>')? + start + 1;
     let end = lower[title_body_start..].find("</title>")? + title_body_start;
-    let title = html[title_body_start..end]
+    let title = without_comments[title_body_start..end]
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    let title = decode_html_entities(&title);
     (!title.is_empty()).then_some(title)
+}
+
+fn strip_html_comments(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut remaining = html;
+    while let Some(start) = remaining.find("<!--") {
+        out.push_str(&remaining[..start]);
+        let comment = &remaining[start + 4..];
+        let Some(end) = comment.find("-->") else {
+            return out;
+        };
+        remaining = &comment[end + 3..];
+    }
+    out.push_str(remaining);
+    out
+}
+
+fn decode_html_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find('&') {
+        out.push_str(&remaining[..start]);
+        let entity_candidate = &remaining[start + 1..];
+        let Some(end) = entity_candidate.find(';') else {
+            out.push_str(&remaining[start..]);
+            return out;
+        };
+        let entity = &entity_candidate[..end];
+        if let Some(decoded) = decode_html_entity(entity) {
+            out.push(decoded);
+        } else {
+            out.push('&');
+            out.push_str(entity);
+            out.push(';');
+        }
+        remaining = &entity_candidate[end + 1..];
+    }
+    out.push_str(remaining);
+    out
+}
+
+fn decode_html_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            u32::from_str_radix(&entity[2..], 16)
+                .ok()
+                .and_then(char::from_u32)
+        }
+        _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
+        _ => None,
+    }
 }
 
 fn fingerprint_web_page(page: &WebPage) -> SourceFingerprint {
@@ -1459,6 +1569,40 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_web_response_headers_rejects_unsupported_or_large_pages() {
+        assert!(validate_web_response_headers(
+            "https://example.com/file.zip",
+            Some("application/octet-stream"),
+            Some(10),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported web content type"));
+        assert!(validate_web_response_headers(
+            "https://example.com/huge.html",
+            Some("text/html; charset=utf-8"),
+            Some(WEB_MAX_BODY_BYTES + 1),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("too large"));
+        assert!(validate_web_response_headers(
+            "https://example.com/page.html",
+            Some("text/html; charset=utf-8"),
+            Some(WEB_MAX_BODY_BYTES),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_extract_html_title_decodes_entities_and_ignores_comments() {
+        let title = extract_html_title(
+            "<!-- <title>Wrong</title> --><html><head><TITLE>Guide &amp; Docs &#40;v1&#41;</TITLE></head></html>",
+        );
+        assert_eq!(title.as_deref(), Some("Guide & Docs (v1)"));
+    }
+
+    #[test]
     fn test_chunk_text_basic() {
         let chunks = chunk_text("abcdefghij", 5, 2);
         assert_eq!(chunks, vec!["abcde", "defgh", "ghij"]);
@@ -1775,7 +1919,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_url_indexes_single_html_page() {
         let page_url = one_shot_html_server(
-            "<html><head><title>Guide</title></head><body><h1>Guide</h1><p>Hello web.</p></body></html>",
+            "<html><head><title>Guide &amp; Docs</title></head><body><h1>Guide &amp; Docs</h1><p>Hello web.</p></body></html>",
         );
         let base_url = one_shot_json_server("200 OK", r#"{"embeddings":[[0.1,0.2]]}"#);
         let embedder = Embedder::new(base_url, "embed".to_string());
@@ -1790,10 +1934,11 @@ mod tests {
         assert!(result.source_paths[0].starts_with(&page_url));
         assert!(result.rows[0].source_path.starts_with(&page_url));
         assert_eq!(result.rows[0].format, "html");
-        assert!(result.rows[0].chunk_text.contains("Guide"));
+        assert!(result.rows[0].chunk_text.contains("Guide & Docs"));
         assert!(result.rows[0].chunk_text.contains("Hello web."));
-        assert!(result.rows[0].metadata.contains("\"title\":\"Guide\""));
-        assert!(result.rows[0].metadata.contains("\"url\":"));
+        let metadata: Value = serde_json::from_str(&result.rows[0].metadata).unwrap();
+        assert_eq!(metadata["title"], "Guide & Docs");
+        assert!(metadata["url"].as_str().is_some());
     }
 
     #[tokio::test]
