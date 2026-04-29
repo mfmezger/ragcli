@@ -17,6 +17,7 @@ mod store;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod ui;
 
 use anyhow::Result;
 use clap::Parser;

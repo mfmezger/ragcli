@@ -6,6 +6,7 @@ use crate::config::{
 use crate::ingest::{ingest_path, PdfParser};
 use crate::models::{Embedder, VisionCaptioner};
 use crate::store::{connect_db, ensure_metadata, load_source_fingerprints, replace_source_rows};
+use crate::ui::{self, Panel};
 use anyhow::Result;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -110,18 +111,39 @@ pub async fn run(
         command_span_inner.record("error_count", result.stats.errors.len());
         command_span_inner.record("elapsed_ms", elapsed_ms as u64);
 
-        println!(
-            "Index complete: {} files, {} chunks, {} skipped, {}ms",
-            result.stats.indexed_files,
-            result.stats.total_chunks,
-            result.stats.skipped_files,
-            elapsed_ms
+        ui::command_header("ragcli index", format!("{}ms", elapsed_ms));
+        let mut summary = Panel::new("Index Summary");
+        summary.kv("path", path.display().to_string(), 14);
+        summary.kv("store", store.display().to_string(), 14);
+        summary.kv("embed model", &embed_model_name, 14);
+        summary.kv("pdf parser", format!("{parser:?}"), 14);
+        summary.status(
+            "status",
+            result.stats.errors.is_empty(),
+            "complete",
+            "completed with errors",
+            14,
         );
+        summary.kv(
+            "result",
+            format!(
+                "Index complete: {} files, {} chunks, {} skipped",
+                result.stats.indexed_files, result.stats.total_chunks, result.stats.skipped_files
+            ),
+            14,
+        );
+        summary.kv("indexed files", result.stats.indexed_files.to_string(), 14);
+        summary.kv("chunks", result.stats.total_chunks.to_string(), 14);
+        summary.kv("skipped", result.stats.skipped_files.to_string(), 14);
+        summary.render();
 
         if !result.stats.errors.is_empty() {
+            println!();
+            let mut errors = Panel::new("Index Errors");
             for err in &result.stats.errors {
-                eprintln!("index error: {err}");
+                errors.prose("error", err, 8);
             }
+            errors.render();
         }
 
         Ok(())

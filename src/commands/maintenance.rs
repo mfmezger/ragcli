@@ -4,6 +4,7 @@ use crate::store::{
     clear_store_rows, connect_db, delete_source_rows, list_indexed_source_summaries,
     load_indexed_source_summary, IndexedSourceSummary,
 };
+use crate::ui::{self, Panel};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -22,17 +23,20 @@ pub async fn delete(name: Option<&str>, path: String) -> Result<()> {
     ensure_store_layout(&store)?;
     let db = connect_db(&store).await?;
     let Some(source) = load_indexed_source_summary(&db, &path).await? else {
-        println!("No indexed source matched {}", path);
+        let mut panel = Panel::new("Delete Source");
+        panel.kv("source", path, 8);
+        panel.kv("status", ui::warn("not indexed"), 8);
+        panel.render();
         return Ok(());
     };
 
     delete_source_rows(&db, std::slice::from_ref(&source.source_path)).await?;
-    println!(
-        "Deleted {} [{}, {} chunks]",
-        source.source_path,
-        source.format,
-        fmt_count(source.chunks)
-    );
+    let mut panel = Panel::new("Delete Source");
+    panel.kv("source", &source.source_path, 8);
+    panel.kv("format", &source.format, 8);
+    panel.kv("chunks", fmt_count(source.chunks), 8);
+    panel.kv("status", ui::ok("deleted"), 8);
+    panel.render();
     Ok(())
 }
 
@@ -46,7 +50,10 @@ pub async fn clear(name: Option<&str>, yes: bool) -> Result<()> {
     let db = connect_db(&store).await?;
     let sources = list_indexed_source_summaries(&db).await?;
     if sources.is_empty() {
-        println!("Store already empty: {}", store.display());
+        let mut panel = Panel::new("Clear Store");
+        panel.kv("store", store.display().to_string(), 8);
+        panel.kv("status", ui::warn("already empty"), 8);
+        panel.render();
         return Ok(());
     }
 
@@ -54,12 +61,12 @@ pub async fn clear(name: Option<&str>, yes: bool) -> Result<()> {
     let deleted_chunks = sources.iter().map(|source| source.chunks).sum::<usize>();
     clear_store_rows(&db).await?;
 
-    println!(
-        "Cleared store {}: removed {} sources and {} chunks",
-        store.display(),
-        fmt_count(deleted_sources),
-        fmt_count(deleted_chunks)
-    );
+    let mut panel = Panel::new("Clear Store");
+    panel.kv("store", store.display().to_string(), 8);
+    panel.kv("sources", fmt_count(deleted_sources), 8);
+    panel.kv("chunks", fmt_count(deleted_chunks), 8);
+    panel.kv("status", ui::ok("cleared"), 8);
+    panel.render();
     Ok(())
 }
 
@@ -130,39 +137,60 @@ fn source_is_missing(source: &IndexedSourceSummary) -> Result<bool> {
 }
 
 fn print_prune_human(report: &PruneReport) {
-    if report.dry_run {
-        println!("Prune preview");
+    ui::command_header(
+        if report.dry_run {
+            "ragcli prune"
+        } else {
+            "ragcli prune --apply"
+        },
+        "",
+    );
+
+    let mut summary = Panel::new(if report.dry_run {
+        "Prune Preview"
     } else {
-        println!("Prune complete");
-    }
-    println!("  store: {}", report.store);
-    println!("  stale sources: {}", report.stale_sources.len());
+        "Prune Complete"
+    });
+    summary.kv("store", &report.store, 8);
+    summary.kv("stale", report.stale_sources.len().to_string(), 8);
 
     if report.stale_sources.is_empty() {
-        println!("  nothing to prune");
+        summary.kv("status", ui::ok("nothing to prune"), 8);
+        summary.render();
         return;
     }
 
-    for source in &report.stale_sources {
-        let mut details = vec![
-            source.format.clone(),
-            format!("{} chunks", fmt_count(source.chunks)),
-        ];
-        if source.page_count > 0 {
-            details.push(format!("{} pages", fmt_count(source.page_count)));
-        }
-        println!("    - {}  [{}]", source.source_path, details.join(", "));
-    }
-
     if report.dry_run {
-        println!("  rerun with --apply to remove these rows");
+        summary.kv("status", ui::warn("dry run"), 8);
+        summary.hint("Rerun with `--apply` to remove these rows.");
     } else {
-        println!(
-            "  removed {} sources and {} chunks",
-            fmt_count(report.deleted_sources),
-            fmt_count(report.deleted_chunks)
-        );
+        summary.kv("sources", fmt_count(report.deleted_sources), 8);
+        summary.kv("chunks", fmt_count(report.deleted_chunks), 8);
+        summary.kv("status", ui::ok("removed stale rows"), 8);
     }
+    summary.render();
+
+    println!();
+    ui::render_table(
+        "Stale Sources",
+        &["Source", "Format", "Chunks", "Pages"],
+        report
+            .stale_sources
+            .iter()
+            .map(|source| {
+                vec![
+                    source.source_path.clone(),
+                    source.format.clone(),
+                    fmt_count(source.chunks),
+                    if source.page_count > 0 {
+                        fmt_count(source.page_count)
+                    } else {
+                        "-".to_string()
+                    },
+                ]
+            })
+            .collect(),
+    );
 }
 
 #[cfg(test)]

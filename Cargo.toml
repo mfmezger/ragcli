@@ -27,6 +27,8 @@ globset = "0.4"
 html2text = "0.13"
 indicatif = "0.17"
 console = "0.15"
+comfy-table = "7.2"
+textwrap = "0.16"
 lancedb = "0.26"
 pdf-extract = "0.10"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }

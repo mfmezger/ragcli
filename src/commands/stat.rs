@@ -2,6 +2,7 @@ use crate::config::{ensure_store_layout, load_or_create_config, store_dir};
 use crate::store::{
     collect_store_stats, connect_db, load_metadata, StoreMetadata, StoreStats, DEFAULT_TABLE_NAME,
 };
+use crate::ui::{self, Panel};
 use anyhow::Result;
 use futures::TryStreamExt;
 use lancedb::query::ExecutableQuery;
@@ -74,72 +75,110 @@ async fn build_report(name: Option<&str>) -> Result<StatReport> {
 }
 
 fn print_human(report: &StatReport) {
-    println!("Store summary");
-    println!("  store: {}", report.store);
-    println!("  ollama url: {}", report.ollama_url);
-    println!("  rows embedded: {}", report.stats.total_chunks);
-    println!("  source files: {}", report.stats.unique_sources);
-    println!(
-        "  content mix: {} text, {} pdf, {} image, {} other",
-        report.stats.content_kinds.text_files,
-        report.stats.content_kinds.pdf_files,
-        report.stats.content_kinds.image_files,
-        report.stats.content_kinds.other_files
-    );
-    println!("  pdf pages: {}", report.stats.pdf_pages);
-    println!("  embedded chars: {}", fmt_count(report.stats.total_chars));
-    println!(
-        "  estimated embedded tokens: ~{}",
-        fmt_count(report.stats.estimated_tokens)
-    );
+    ui::command_header("ragcli stat", "");
 
+    let mut summary = Panel::new("Store Summary");
+    summary.kv("store", &report.store, 13);
+    summary.kv("ollama url", &report.ollama_url, 13);
+    summary.kv("rows", report.stats.total_chunks.to_string(), 13);
+    summary.kv("sources", report.stats.unique_sources.to_string(), 13);
+    summary.kv("pdf pages", report.stats.pdf_pages.to_string(), 13);
+    summary.kv("chars", fmt_count(report.stats.total_chars), 13);
+    summary.kv(
+        "tokens",
+        format!("~{}", fmt_count(report.stats.estimated_tokens)),
+        13,
+    );
+    summary.render();
+
+    println!();
+    let mut content = Panel::new("Content Mix");
+    content.kv("text", report.stats.content_kinds.text_files.to_string(), 8);
+    content.kv("pdf", report.stats.content_kinds.pdf_files.to_string(), 8);
+    content.kv(
+        "image",
+        report.stats.content_kinds.image_files.to_string(),
+        8,
+    );
+    content.kv(
+        "other",
+        report.stats.content_kinds.other_files.to_string(),
+        8,
+    );
     if report.stats.total_chunks > 0 {
-        println!(
-            "  avg chunk: {} chars, ~{} tokens",
-            report.stats.total_chars / report.stats.total_chunks,
-            report.stats.estimated_tokens / report.stats.total_chunks
+        content.kv(
+            "avg",
+            format!(
+                "{} chars, ~{} tokens",
+                report.stats.total_chars / report.stats.total_chunks,
+                report.stats.estimated_tokens / report.stats.total_chunks
+            ),
+            8,
         );
-        println!(
-            "  chunk range: {}..{} chars",
-            report.stats.min_chunk_chars, report.stats.max_chunk_chars
+        content.kv(
+            "range",
+            format!(
+                "{}..{} chars",
+                report.stats.min_chunk_chars, report.stats.max_chunk_chars
+            ),
+            8,
         );
     }
+    content.render();
 
+    println!();
+    let mut storage = Panel::new("Storage");
+    storage.kv("total", fmt_bytes(report.disk_usage.total_bytes), 8);
+    storage.kv("lancedb", fmt_bytes(report.disk_usage.lancedb_bytes), 8);
+    storage.kv("meta", fmt_bytes(report.disk_usage.meta_bytes), 8);
+    storage.kv("cache", fmt_bytes(report.disk_usage.cache_bytes), 8);
+    storage.kv("models", fmt_bytes(report.disk_usage.models_bytes), 8);
     if let Some(metadata) = &report.metadata {
-        println!(
-            "  embedding: {} (dim {})",
-            metadata.embed_model, metadata.embedding_dim
+        storage.kv(
+            "embed",
+            format!("{} (dim {})", metadata.embed_model, metadata.embedding_dim),
+            8,
         );
-        println!(
-            "  chunking: size {}, overlap {}",
-            metadata.chunk_size, metadata.chunk_overlap
+        storage.kv(
+            "chunking",
+            format!(
+                "size {}, overlap {}",
+                metadata.chunk_size, metadata.chunk_overlap
+            ),
+            8,
         );
     } else {
-        println!("  embedding: metadata missing");
+        storage.kv("embed", ui::warn("metadata missing"), 8);
     }
+    storage.render();
 
-    println!("  disk usage: {}", fmt_bytes(report.disk_usage.total_bytes));
-    println!(
-        "    lancedb: {}",
-        fmt_bytes(report.disk_usage.lancedb_bytes)
-    );
-    println!("    meta: {}", fmt_bytes(report.disk_usage.meta_bytes));
-    println!("    cache: {}", fmt_bytes(report.disk_usage.cache_bytes));
-    println!("    models: {}", fmt_bytes(report.disk_usage.models_bytes));
-    for warning in &report.warnings {
-        eprintln!("  warning: {}", warning);
+    if !report.warnings.is_empty() {
+        println!();
+        let mut warnings = Panel::new("Warnings");
+        for warning in &report.warnings {
+            warnings.prose("warning", warning, 8);
+        }
+        warnings.render();
     }
 
     if !report.stats.top_sources.is_empty() {
-        println!("  top sources by chunk count:");
-        for source in &report.stats.top_sources {
-            println!(
-                "    - {}  [{} chunks, ~{} tokens]",
-                source.source_path,
-                fmt_count(source.chunks),
-                fmt_count(source.estimated_tokens)
-            );
-        }
+        println!();
+        ui::render_table(
+            "Top Sources",
+            &["Source", "Chunks", "Tokens"],
+            report
+                .stats
+                .top_sources
+                .iter()
+                .map(|source| {
+                    vec![
+                        source.source_path.clone(),
+                        fmt_count(source.chunks),
+                        format!("~{}", fmt_count(source.estimated_tokens)),
+                    ]
+                })
+                .collect(),
+        );
     }
 }
 

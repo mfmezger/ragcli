@@ -4,17 +4,15 @@ use crate::config::{
 use crate::models::OllamaClient;
 use crate::store;
 use crate::telemetry::{TelemetryConfig, TelemetryStatus};
+use crate::ui::{self, Panel};
 use anyhow::{Context, Result};
-use console::{measure_text_width, style};
+use console::style;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
-
-const MIN_BOX_WIDTH: usize = 48;
-const MAX_PROSE_WIDTH: usize = 104;
 
 #[derive(Debug, Serialize)]
 pub struct PathStatusReport {
@@ -151,16 +149,10 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
 }
 
 fn print_human(report: &DoctorReport) {
-    // ── Header ────────────────────────────────────────────────────────────────
-    println!(
-        "{}  {}",
-        style("ragcli doctor").bold().cyan(),
-        style(format_unix_timestamp(report.time)).dim()
-    );
-    println!();
+    ui::command_header("ragcli doctor", format_unix_timestamp(report.time));
 
     // ── Paths ─────────────────────────────────────────────────────────────────
-    let mut paths_box = SectionBox::new("Paths");
+    let mut paths_box = Panel::new("Paths");
     paths_box.push(path_row_str("base", &report.base, 8));
     paths_box.push(path_row_str("store", &report.store, 8));
     paths_box.push(path_row_str("config", &report.config, 8));
@@ -173,7 +165,7 @@ fn print_human(report: &DoctorReport) {
         ));
     }
     if let Some(summary) = &report.metadata_summary {
-        for row in wrapped_dim_rows("summary", summary, 8, MAX_PROSE_WIDTH) {
+        for row in ui::wrapped_dim_rows("summary", summary, 8, ui::DEFAULT_WRAP_WIDTH) {
             paths_box.push(row);
         }
     }
@@ -181,12 +173,12 @@ fn print_human(report: &DoctorReport) {
     println!();
 
     // ── Ollama ────────────────────────────────────────────────────────────────
-    let mut ollama_box = SectionBox::new("Ollama");
+    let mut ollama_box = Panel::new("Ollama");
     ollama_box.push(kv_str("url", &report.ollama_url, 9));
     if report.ollama_reachable {
-        ollama_box.push(kv_str("reachable", &ok("yes"), 9));
+        ollama_box.push(kv_str("reachable", &ui::ok("yes"), 9));
     } else {
-        ollama_box.push(kv_str("reachable", &err("no"), 9));
+        ollama_box.push(kv_str("reachable", &ui::err("no"), 9));
         if let Some(e) = &report.ollama_error {
             ollama_box.push(format!(
                 "  {:<9}  {}",
@@ -199,7 +191,7 @@ fn print_human(report: &DoctorReport) {
     println!();
 
     // ── Models ────────────────────────────────────────────────────────────────
-    let mut models_box = SectionBox::new("Models");
+    let mut models_box = Panel::new("Models");
     match &report.installed_models {
         Some(inst) => {
             models_box.push(model_row_str(
@@ -231,12 +223,12 @@ fn print_human(report: &DoctorReport) {
     println!();
 
     // ── Telemetry ─────────────────────────────────────────────────────────────
-    let mut tel_box = SectionBox::new("Telemetry");
+    let mut tel_box = Panel::new("Telemetry");
     let tel = &report.telemetry;
     if tel.enabled {
-        tel_box.push(kv_str("enabled", &ok("yes"), 14));
+        tel_box.push(kv_str("enabled", &ui::ok("yes"), 14));
     } else {
-        tel_box.push(kv_str("enabled", &err("no"), 14));
+        tel_box.push(kv_str("enabled", &ui::err("no"), 14));
     }
     tel_box.push(kv_str("service name", &tel.service_name, 14));
     tel_box.push(kv_str("protocol", &tel.protocol, 14));
@@ -247,9 +239,9 @@ fn print_human(report: &DoctorReport) {
         tel_box.push(kv_str("timeout (ms)", &timeout_ms.to_string(), 14));
     }
     if tel.headers_configured {
-        tel_box.push(kv_str("headers", &ok("configured"), 14));
+        tel_box.push(kv_str("headers", &ui::ok("configured"), 14));
     } else {
-        tel_box.push(kv_str("headers", &err("not configured"), 14));
+        tel_box.push(kv_str("headers", &ui::err("not configured"), 14));
     }
     if let Some(e) = &report.telemetry_error {
         tel_box.push(format!(
@@ -262,7 +254,7 @@ fn print_human(report: &DoctorReport) {
     println!();
 
     // ── Store Layout ──────────────────────────────────────────────────────────
-    let mut layout_box = SectionBox::new("Store Layout");
+    let mut layout_box = Panel::new("Store Layout");
     let col = report
         .subdirectories
         .iter()
@@ -271,9 +263,9 @@ fn print_human(report: &DoctorReport) {
         .unwrap_or(0);
     for sub in &report.subdirectories {
         let status_str = if sub.status == "exists" {
-            ok("exists")
+            ui::ok("exists")
         } else {
-            err("missing")
+            ui::err("missing")
         };
         layout_box.push(format!(
             "  {}  {}  {}",
@@ -294,9 +286,9 @@ fn print_hints(report: &DoctorReport) {
     }
 
     println!();
-    let mut hints_box = SectionBox::new("Hints");
+    let mut hints_box = Panel::new("Hints");
     for hint in hints {
-        for row in wrapped_hint_rows(&hint, MAX_PROSE_WIDTH) {
+        for row in ui::wrapped_hint_rows(&hint, ui::DEFAULT_WRAP_WIDTH) {
             hints_box.push(row);
         }
     }
@@ -412,70 +404,6 @@ fn model_install_hints(
         .collect()
 }
 
-/// Renders a labelled section with rounded box-drawing borders.
-///
-/// ```text
-/// ╭─ Title ──────────────────────────────╮
-/// │  key   value                         │
-/// ╰──────────────────────────────────────╯
-/// ```
-struct SectionBox {
-    title: &'static str,
-    rows: Vec<String>,
-}
-
-impl SectionBox {
-    fn new(title: &'static str) -> Self {
-        Self {
-            title,
-            rows: Vec::new(),
-        }
-    }
-
-    fn push(&mut self, row: impl Into<String>) {
-        self.rows.push(row.into());
-    }
-
-    fn render(&self) {
-        let title_visual = measure_text_width(self.title);
-        let max_row_visual = self
-            .rows
-            .iter()
-            .map(|r| measure_text_width(r))
-            .max()
-            .unwrap_or(0);
-
-        // Total box width (including the two │ borders).
-        // – content area: box_width - 4  (│·content·│)
-        // – title must fit in top border: box_width >= title_visual + 5 + 1 filler
-        // Do not cap to terminal width here: rows are already styled strings, and
-        // truncating them risks cutting ANSI escape sequences while still leaving
-        // long paths, metadata summaries, and hints outside the right border.
-        let box_width = (max_row_visual + 4)
-            .max(title_visual + 6)
-            .max(MIN_BOX_WIDTH);
-        let inner_width = box_width - 4;
-
-        // Top border  ╭─ Title ─────────────────────╮
-        let top_fill = box_width.saturating_sub(title_visual + 5);
-        println!(
-            "╭─ {} {}╮",
-            style(self.title).bold().cyan(),
-            "─".repeat(top_fill)
-        );
-
-        // Content rows  │ …content… │
-        for row in &self.rows {
-            let visual = measure_text_width(row);
-            let pad = inner_width.saturating_sub(visual);
-            println!("│ {}{} │", row, " ".repeat(pad));
-        }
-
-        // Bottom border  ╰──────────────────────────╯
-        println!("╰{}╯", "─".repeat(box_width - 2));
-    }
-}
-
 /// Build a plain key/value row string with aligned padding.
 fn kv_str(label: &str, value: &str, width: usize) -> String {
     format!("  {}  {}", style(format!("{label:<width$}")).dim(), value)
@@ -484,9 +412,9 @@ fn kv_str(label: &str, value: &str, width: usize) -> String {
 /// Build a path row string: label  path  ✓/✗ status.
 fn path_row_str(label: &str, report: &PathStatusReport, width: usize) -> String {
     let status_str = if report.status == "exists" {
-        ok("exists")
+        ui::ok("exists")
     } else {
-        err("missing")
+        ui::err("missing")
     };
     format!(
         "  {}  {}  {}",
@@ -499,9 +427,9 @@ fn path_row_str(label: &str, report: &PathStatusReport, width: usize) -> String 
 /// Build a model row string: label  model-name  ✓/✗ installed.
 fn model_row_str(label: &str, model: &str, installed: bool, width: usize) -> String {
     let status_str = if installed {
-        ok("installed")
+        ui::ok("installed")
     } else {
-        err("not installed")
+        ui::err("not installed")
     };
     format!(
         "  {}  {:<30}  {}",
@@ -509,81 +437,6 @@ fn model_row_str(label: &str, model: &str, installed: bool, width: usize) -> Str
         model,
         status_str,
     )
-}
-
-fn wrapped_dim_rows(
-    label: &str,
-    text: &str,
-    label_width: usize,
-    value_width: usize,
-) -> Vec<String> {
-    wrap_words(text, value_width)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, line)| {
-            let label = if idx == 0 { label } else { "" };
-            format!(
-                "  {}  {}",
-                style(format!("{label:<label_width$}")).dim(),
-                style(line).dim()
-            )
-        })
-        .collect()
-}
-
-fn wrapped_hint_rows(hint: &str, width: usize) -> Vec<String> {
-    wrap_words(hint, width)
-        .into_iter()
-        .enumerate()
-        .map(|(idx, line)| {
-            if idx == 0 {
-                format!("  {} {}", style("→").yellow().bold(), style(line).yellow())
-            } else {
-                format!("    {}", style(line).yellow())
-            }
-        })
-        .collect()
-}
-
-fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current.push_str(word);
-            continue;
-        }
-
-        let next_width = measure_text_width(&current) + 1 + measure_text_width(word);
-        if next_width > max_width {
-            lines.push(current);
-            current = word.to_string();
-        } else {
-            current.push(' ');
-            current.push_str(word);
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-
-    lines
-}
-
-/// Green ✓ prefix with text.
-fn ok(text: &str) -> String {
-    format!("{} {}", style("✓").green().bold(), style(text).green())
-}
-
-/// Red ✗ prefix with text.
-fn err(text: &str) -> String {
-    format!("{} {}", style("✗").red().bold(), style(text).red())
 }
 
 fn format_unix_timestamp(timestamp: u64) -> String {
