@@ -22,7 +22,7 @@ use super::render::{
 };
 use super::retrieve::retrieve_candidates;
 use super::runtime::{mode_label, prepare_runtime};
-use super::types::{QueryExecutionPath, QueryResult, QueryRuntime};
+use super::types::{QueryExecutionPath, QueryJsonReport, QueryResult, QueryRuntime};
 
 pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
     let runtime = prepare_runtime(name, &command)?;
@@ -58,6 +58,24 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
 
         span_inner.record("hit_count", result.hits.len());
         span_inner.record("iteration_count", result.iterations.len());
+
+        if command.json {
+            let answer = match &result.answer {
+                Some(answer) => answer.clone(),
+                None => generate_answer(&runtime, &command, &result).await?,
+            };
+            let report = QueryJsonReport::from_result(
+                &command.question,
+                mode_label(command.mode),
+                &result,
+            );
+            let report = QueryJsonReport {
+                answer: Some(store::strip_thinking(&answer)),
+                ..report
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
 
         if result.hits.is_empty() {
             let mut panel = Panel::new("Query Result");
@@ -508,6 +526,7 @@ mod tests {
                     format: None,
                     gen_model: None,
                     max_tokens: 64,
+                    json: false,
                 },
             )
             .await
@@ -573,6 +592,7 @@ mod tests {
                     format: None,
                     gen_model: None,
                     max_tokens: 64,
+                    json: false,
                 },
             )
             .await
@@ -647,6 +667,7 @@ mod tests {
                     format: None,
                     gen_model: None,
                     max_tokens: 64,
+                    json: false,
                 },
             )
             .await
@@ -676,6 +697,7 @@ mod tests {
             format: None,
             gen_model: None,
             max_tokens: 256,
+            json: false,
         };
 
         assert_eq!(retrieval_limit(&command), 20);
@@ -766,6 +788,7 @@ mod tests {
                         format: None,
                         gen_model: None,
                         max_tokens: 64,
+                        json: false,
                     },
                 )
                 .await
