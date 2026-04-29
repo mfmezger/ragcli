@@ -439,10 +439,6 @@ impl SectionBox {
     }
 
     fn render(&self) {
-        // Determine usable terminal width, falling back to 80.
-        let term_cols = console::Term::stdout().size().1 as usize;
-        let term_width = if term_cols < 20 { 80 } else { term_cols };
-
         let title_visual = measure_text_width(self.title);
         let max_row_visual = self
             .rows
@@ -454,10 +450,10 @@ impl SectionBox {
         // Total box width (including the two │ borders).
         // – content area: box_width - 4  (│·content·│)
         // – title must fit in top border: box_width >= title_visual + 5 + 1 filler
-        let box_width = (max_row_visual + 4)
-            .max(title_visual + 6)
-            .max(42)
-            .min(term_width);
+        // Do not cap to terminal width here: rows are already styled strings, and
+        // truncating them risks cutting ANSI escape sequences while still leaving
+        // long paths, metadata summaries, and hints outside the right border.
+        let box_width = (max_row_visual + 4).max(title_visual + 6).max(42);
         let inner_width = box_width - 4;
 
         // Top border  ╭─ Title ─────────────────────╮
