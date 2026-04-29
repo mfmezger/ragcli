@@ -4642,6 +4642,7 @@ dependencies = [
  "atomicwrites",
  "base64 0.22.1",
  "clap",
+ "console",
  "csv",
  "futures",
  "globset",

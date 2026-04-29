@@ -5,6 +5,7 @@ use crate::models::OllamaClient;
 use crate::store;
 use crate::telemetry::{TelemetryConfig, TelemetryStatus};
 use anyhow::{Context, Result};
+use console::style;
 use serde::Serialize;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -146,76 +147,171 @@ async fn build_report(name: Option<&str>) -> Result<DoctorReport> {
 }
 
 fn print_human(report: &DoctorReport) {
-    println!("Doctor report");
-    println!("  time: {}", format_unix_timestamp(report.time));
-    println!("  base: {} ({})", report.base.path, report.base.status);
-    println!("  store: {} ({})", report.store.path, report.store.status);
+    // ── Header ────────────────────────────────────────────────────────────────
     println!(
-        "  config: {} ({})",
-        report.config.path, report.config.status
+        "{}  {}",
+        style("ragcli doctor").bold().cyan(),
+        style(format_unix_timestamp(report.time)).dim()
     );
-    println!("  ollama url: {}", report.ollama_url);
-    println!("  embed model: {}", report.embed_model);
-    println!("  chat model: {}", report.chat_model);
-    println!("  vision model: {}", report.vision_model);
+    println!();
 
+    // ── Paths ─────────────────────────────────────────────────────────────────
+    section("Paths");
+    path_row("base", &report.base, 8);
+    path_row("store", &report.store, 8);
+    path_row("config", &report.config, 8);
+    path_row("metadata", &report.metadata, 8);
+    if let Some(err) = &report.metadata_error {
+        eprintln!("  {:<8}  {}", style("error").red().bold(), style(err).red());
+    }
+    if let Some(summary) = &report.metadata_summary {
+        println!("  {:<8}  {}", style("summary").dim(), style(summary).dim());
+    }
+    println!();
+
+    // ── Ollama ────────────────────────────────────────────────────────────────
+    section("Ollama");
+    kv("url", &report.ollama_url, 9);
     if report.ollama_reachable {
-        println!("  ollama: reachable");
-        if let Some(installed_models) = &report.installed_models {
-            println!(
-                "  embed model installed: {}",
-                status(installed_models.embed_model_installed)
-            );
-            println!(
-                "  chat model installed: {}",
-                status(installed_models.chat_model_installed)
-            );
-            println!(
-                "  vision model installed: {}",
-                status(installed_models.vision_model_installed)
+        kv_styled("reachable", &ok("yes"), 9);
+    } else {
+        kv_styled("reachable", &err("no"), 9);
+        if let Some(e) = &report.ollama_error {
+            eprintln!("  {:<9}  {}", style("error").red().bold(), style(e).red());
+        }
+    }
+    println!();
+
+    // ── Models ────────────────────────────────────────────────────────────────
+    section("Models");
+    match &report.installed_models {
+        Some(inst) => {
+            model_row("embed", &report.embed_model, inst.embed_model_installed, 6);
+            model_row("chat", &report.chat_model, inst.chat_model_installed, 6);
+            model_row(
+                "vision",
+                &report.vision_model,
+                inst.vision_model_installed,
+                6,
             );
         }
-    } else if let Some(err) = &report.ollama_error {
-        eprintln!("  ollama: unreachable ({})", err);
+        None => {
+            kv("embed", &report.embed_model, 6);
+            kv("chat", &report.chat_model, 6);
+            kv("vision", &report.vision_model, 6);
+        }
     }
+    println!();
 
-    println!("  telemetry enabled: {}", status(report.telemetry.enabled));
-    println!(
-        "  telemetry service name: {}",
-        report.telemetry.service_name
-    );
-    println!("  telemetry protocol: {}", report.telemetry.protocol);
-    if let Some(endpoint) = &report.telemetry.endpoint {
-        println!("  telemetry endpoint: {}", endpoint);
+    // ── Telemetry ─────────────────────────────────────────────────────────────
+    section("Telemetry");
+    let tel = &report.telemetry;
+    if tel.enabled {
+        kv_styled("enabled", &ok("yes"), 14);
+    } else {
+        kv_styled("enabled", &err("no"), 14);
     }
-    if let Some(timeout_ms) = report.telemetry.timeout_ms {
-        println!("  telemetry timeout ms: {}", timeout_ms);
+    kv("service name", &tel.service_name, 14);
+    kv("protocol", &tel.protocol, 14);
+    if let Some(endpoint) = &tel.endpoint {
+        kv("endpoint", endpoint, 14);
     }
-    println!(
-        "  telemetry headers configured: {}",
-        status(report.telemetry.headers_configured)
-    );
-    if let Some(err) = &report.telemetry_error {
-        eprintln!("  telemetry config error: {}", err);
+    if let Some(timeout_ms) = tel.timeout_ms {
+        kv("timeout (ms)", &timeout_ms.to_string(), 14);
     }
-
-    println!(
-        "  metadata: {} ({})",
-        report.metadata.path, report.metadata.status
-    );
-    if let Some(metadata_summary) = &report.metadata_summary {
-        println!("  metadata summary: {}", metadata_summary);
+    if tel.headers_configured {
+        kv_styled("headers", &ok("configured"), 14);
+    } else {
+        kv_styled("headers", &err("not configured"), 14);
     }
-    if let Some(metadata_error) = &report.metadata_error {
-        eprintln!("  metadata error: {}", metadata_error);
-    }
-
-    for subdirectory in &report.subdirectories {
-        println!(
-            "  {}: {} ({})",
-            subdirectory.name, subdirectory.path, subdirectory.status
+    if let Some(e) = &report.telemetry_error {
+        eprintln!(
+            "  {:<14}  {}",
+            style("config error").red().bold(),
+            style(e).red()
         );
     }
+    println!();
+
+    // ── Store Layout ──────────────────────────────────────────────────────────
+    section("Store Layout");
+    let col = report
+        .subdirectories
+        .iter()
+        .map(|s| s.name.len())
+        .max()
+        .unwrap_or(0);
+    for sub in &report.subdirectories {
+        let status_str = if sub.status == "exists" {
+            ok("exists")
+        } else {
+            err("missing")
+        };
+        println!(
+            "  {:<col$}  {}  {}",
+            style(&sub.name).bold(),
+            style(&sub.path).dim(),
+            status_str,
+            col = col
+        );
+    }
+}
+
+/// Print a bold cyan section header.
+fn section(title: &str) {
+    println!("{}", style(title).bold().cyan());
+}
+
+/// Print a plain key/value row with aligned padding.
+fn kv(label: &str, value: &str, width: usize) {
+    println!("  {:<width$}  {}", style(label).dim(), value, width = width);
+}
+
+/// Print a key/value row where the value is already a styled string.
+fn kv_styled(label: &str, value: &str, width: usize) {
+    println!("  {:<width$}  {}", style(label).dim(), value, width = width);
+}
+
+/// Print a path row: label  path  ✓/✗ status.
+fn path_row(label: &str, report: &PathStatusReport, width: usize) {
+    let status_str = if report.status == "exists" {
+        ok("exists")
+    } else {
+        err("missing")
+    };
+    println!(
+        "  {:<width$}  {}  {}",
+        style(label).dim(),
+        style(&report.path).dim(),
+        status_str,
+        width = width
+    );
+}
+
+/// Print a model row: label  model-name  ✓/✗ installed.
+fn model_row(label: &str, model: &str, installed: bool, width: usize) {
+    let status_str = if installed {
+        ok("installed")
+    } else {
+        err("not installed")
+    };
+    println!(
+        "  {:<width$}  {:<30}  {}",
+        style(label).dim(),
+        model,
+        status_str,
+        width = width
+    );
+}
+
+/// Green ✓ prefix with text.
+fn ok(text: &str) -> String {
+    format!("{} {}", style("✓").green().bold(), style(text).green())
+}
+
+/// Red ✗ prefix with text.
+fn err(text: &str) -> String {
+    format!("{} {}", style("✗").red().bold(), style(text).red())
 }
 
 fn format_unix_timestamp(timestamp: u64) -> String {
