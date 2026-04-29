@@ -1,6 +1,6 @@
 //! File ingestion and chunking for the local RAG store.
 
-use crate::models::{Embedder, VisionCaptioner};
+use crate::models::{is_context_length_error, Embedder, VisionCaptioner};
 use crate::source_kind::SourceKind;
 use crate::store::{ChunkRow, SourceFingerprint};
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,8 @@ pub struct IngestResult {
     /// Aggregate indexing statistics.
     pub stats: IndexStats,
 }
+
+const MIN_CONTEXT_RETRY_CHARS: usize = 8;
 
 #[derive(Debug, Clone)]
 struct ChunkContent {
@@ -333,53 +335,132 @@ async fn embed_chunks(
 ) -> Result<Vec<ChunkRow>> {
     let mut rows = Vec::new();
     let source_absolute_path = canonical_source_path(path);
-    for (idx, chunk) in chunks.into_iter().enumerate() {
-        let embedding = embedder.embed(&chunk.text).await?;
-        if dim.is_none() {
-            *dim = Some(embedding.len());
-        }
-        let chunk_hash = hash_text(path, &chunk.text, page_num, idx as i32);
-        let mut metadata = chunk.metadata;
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert("source".to_string(), json!(path.display().to_string()));
-            obj.insert("page".to_string(), json!(page_num));
-            obj.insert(
-                "source_fingerprint".to_string(),
-                json!(source_fingerprint.fingerprint),
-            );
-            obj.insert(
-                "source_size_bytes".to_string(),
-                json!(source_fingerprint.size_bytes),
-            );
-            obj.insert(
-                "source_modified_unix_ms".to_string(),
-                json!(source_fingerprint.modified_unix_ms),
-            );
-            if let Some(source_absolute_path) = &source_absolute_path {
+    let mut chunk_index = 0_i32;
+
+    for chunk in chunks {
+        for embedded in embed_chunk_with_context_retry(chunk, embedder, dim).await? {
+            let chunk_hash = hash_text(path, &embedded.text, page_num, chunk_index);
+            let mut metadata = embedded.metadata;
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert("source".to_string(), json!(path.display().to_string()));
+                obj.insert("page".to_string(), json!(page_num));
                 obj.insert(
-                    "source_absolute_path".to_string(),
-                    json!(source_absolute_path),
+                    "source_fingerprint".to_string(),
+                    json!(source_fingerprint.fingerprint),
                 );
+                obj.insert(
+                    "source_size_bytes".to_string(),
+                    json!(source_fingerprint.size_bytes),
+                );
+                obj.insert(
+                    "source_modified_unix_ms".to_string(),
+                    json!(source_fingerprint.modified_unix_ms),
+                );
+                if let Some(source_absolute_path) = &source_absolute_path {
+                    obj.insert(
+                        "source_absolute_path".to_string(),
+                        json!(source_absolute_path),
+                    );
+                }
             }
+            let format = metadata
+                .get("format")
+                .and_then(Value::as_str)
+                .context("chunk metadata missing format")?
+                .to_string();
+            rows.push(ChunkRow {
+                id: chunk_hash.clone(),
+                source_path: path.display().to_string(),
+                chunk_text: embedded.text,
+                chunk_hash,
+                format,
+                page: page_num,
+                chunk_index,
+                metadata: metadata.to_string(),
+                embedding: embedded.embedding,
+            });
+            chunk_index += 1;
         }
-        let format = metadata
-            .get("format")
-            .and_then(Value::as_str)
-            .context("chunk metadata missing format")?
-            .to_string();
-        rows.push(ChunkRow {
-            id: chunk_hash.clone(),
-            source_path: path.display().to_string(),
-            chunk_text: chunk.text,
-            chunk_hash,
-            format,
-            page: page_num,
-            chunk_index: idx as i32,
-            metadata: metadata.to_string(),
-            embedding,
-        });
     }
     Ok(rows)
+}
+
+struct EmbeddedChunk {
+    text: String,
+    metadata: Value,
+    embedding: Vec<f32>,
+}
+
+async fn embed_chunk_with_context_retry(
+    chunk: ChunkContent,
+    embedder: &Embedder,
+    dim: &mut Option<usize>,
+) -> Result<Vec<EmbeddedChunk>> {
+    let mut pending = VecDeque::from([chunk]);
+    let mut embedded = Vec::new();
+
+    while let Some(chunk) = pending.pop_front() {
+        match embedder.embed(&chunk.text).await {
+            Ok(embedding) => {
+                if dim.is_none() {
+                    *dim = Some(embedding.len());
+                }
+                embedded.push(EmbeddedChunk {
+                    text: chunk.text,
+                    metadata: chunk.metadata,
+                    embedding,
+                });
+            }
+            Err(err) if is_context_length_error(&err) => {
+                let text_len = char_len(&chunk.text);
+                if text_len <= MIN_CONTEXT_RETRY_CHARS {
+                    return Err(err.context(format!(
+                        "embedding chunk still exceeds model context length after retry splitting ({text_len} chars)"
+                    )));
+                }
+                let Some((left, right)) = split_text_for_context_retry(&chunk.text) else {
+                    return Err(err.context(format!(
+                        "embedding chunk still exceeds model context length after retry splitting ({text_len} chars)"
+                    )));
+                };
+                pending.push_front(ChunkContent {
+                    text: right,
+                    metadata: chunk.metadata.clone(),
+                });
+                pending.push_front(ChunkContent {
+                    text: left,
+                    metadata: chunk.metadata,
+                });
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(embedded)
+}
+
+fn split_text_for_context_retry(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    let len = char_len(text);
+    if len <= 1 {
+        return None;
+    }
+
+    let split_at = byte_index_for_char(text, len / 2);
+    let left = text[..split_at].trim().to_string();
+    let right = text[split_at..].trim().to_string();
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+
+    Some((left, right))
+}
+
+fn byte_index_for_char(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
 }
 
 fn canonical_source_path(path: &Path) -> Option<String> {
@@ -1033,7 +1114,7 @@ fn to_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
 
     fn one_shot_json_server(status_line: &str, body: &'static str) -> String {
@@ -1057,6 +1138,82 @@ mod tests {
         });
 
         format!("http://{}", addr)
+    }
+
+    fn length_limited_embed_server(max_chars: usize, max_requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().unwrap();
+
+        thread::spawn(move || {
+            for stream in listener.incoming().take(max_requests) {
+                let mut stream = stream.expect("accept request");
+                let body = read_http_body(&mut stream);
+                let input = serde_json::from_str::<Value>(&body)
+                    .ok()
+                    .and_then(|value| value.get("input")?.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let input_len = char_len(&input);
+                let (status_line, response_body) = if input_len > max_chars {
+                    (
+                        "400 Bad Request",
+                        r#"{"error":"the input length exceeds the context length"}"#.to_string(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        format!(r#"{{"embeddings":[[{},1.0]]}}"#, input_len),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    fn read_http_body(stream: &mut TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut temp = [0_u8; 1024];
+        loop {
+            let n = stream.read(&mut temp).expect("read request");
+            if n == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&temp[..n]);
+            let Some(header_end) = find_bytes(&buffer, b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&buffer[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then_some(value.trim())
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let body_start = header_end + 4;
+            if buffer.len() >= body_start + content_length {
+                return String::from_utf8_lossy(&buffer[body_start..body_start + content_length])
+                    .to_string();
+            }
+        }
+        String::new()
+    }
+
+    fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
     }
 
     #[test]
@@ -1481,6 +1638,41 @@ mod tests {
         assert_eq!(result.stats.indexed_files, 0);
         assert_eq!(result.stats.skipped_files, 1);
         assert!(result.stats.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_path_splits_chunks_when_embed_context_is_exceeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("note.txt");
+        fs::write(&text, "abcdefghijklmnopqrstuvwxyz").unwrap();
+
+        let base_url = length_limited_embed_server(10, 8);
+        let embedder = Embedder::new(base_url, "embed".to_string());
+        let result = ingest_path(
+            &text,
+            100,
+            0,
+            &embedder,
+            None,
+            PdfParser::Native,
+            &[],
+            false,
+            &BTreeMap::new(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.stats.indexed_files, 1);
+        assert_eq!(result.stats.skipped_files, 0);
+        assert!(result.stats.errors.is_empty());
+        assert_eq!(result.rows.len(), 4);
+        assert_eq!(result.rows[0].chunk_text, "abcdef");
+        assert_eq!(result.rows[1].chunk_text, "ghijklm");
+        assert_eq!(result.rows[2].chunk_text, "nopqrs");
+        assert_eq!(result.rows[3].chunk_text, "tuvwxyz");
+        assert_eq!(result.rows[0].chunk_index, 0);
+        assert_eq!(result.rows[3].chunk_index, 3);
     }
 
     #[tokio::test]

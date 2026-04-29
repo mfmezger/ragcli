@@ -425,10 +425,28 @@ fn ollama_error(
                 model,
             );
         }
+        if is_context_length_message(&msg) {
+            return anyhow::anyhow!(
+                "Ollama {} API error: {} - input length exceeds the model context length",
+                operation,
+                status
+            );
+        }
         return anyhow::anyhow!("Ollama {} API error: {} - {}", operation, status, msg);
     }
 
     anyhow::anyhow!("Ollama {} API error: {} - {}", operation, status, body)
+}
+
+/// Returns true when an error came from an Ollama model context-window limit.
+pub fn is_context_length_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| is_context_length_message(&cause.to_string()))
+}
+
+fn is_context_length_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("input length exceeds") && lower.contains("context length")
 }
 
 fn endpoint_host(base_url: &str) -> String {
@@ -520,6 +538,19 @@ mod tests {
             msg.contains("ollama pull llama3:latest"),
             "expected pull command in: {msg}"
         );
+    }
+
+    #[test]
+    fn test_ollama_error_context_length_is_detectable() {
+        let err = ollama_error(
+            "embed",
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":"the input length exceeds the context length"}"#,
+            "embed-model",
+        );
+
+        assert!(is_context_length_error(&err));
+        assert!(err.to_string().contains("model context length"));
     }
 
     #[test]
