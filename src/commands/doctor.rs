@@ -5,7 +5,7 @@ use crate::models::OllamaClient;
 use crate::store;
 use crate::telemetry::{TelemetryConfig, TelemetryStatus};
 use anyhow::{Context, Result};
-use console::style;
+use console::{measure_text_width, style};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -157,85 +157,111 @@ fn print_human(report: &DoctorReport) {
     println!();
 
     // ── Paths ─────────────────────────────────────────────────────────────────
-    section("Paths");
-    path_row("base", &report.base, 8);
-    path_row("store", &report.store, 8);
-    path_row("config", &report.config, 8);
-    path_row("metadata", &report.metadata, 8);
-    if let Some(err) = &report.metadata_error {
-        eprintln!("  {:<8}  {}", style("error").red().bold(), style(err).red());
+    let mut paths_box = SectionBox::new("Paths");
+    paths_box.push(path_row_str("base", &report.base, 8));
+    paths_box.push(path_row_str("store", &report.store, 8));
+    paths_box.push(path_row_str("config", &report.config, 8));
+    paths_box.push(path_row_str("metadata", &report.metadata, 8));
+    if let Some(e) = &report.metadata_error {
+        paths_box.push(format!(
+            "  {:<8}  {}",
+            style("error").red().bold(),
+            style(e).red()
+        ));
     }
     if let Some(summary) = &report.metadata_summary {
-        println!("  {:<8}  {}", style("summary").dim(), style(summary).dim());
+        paths_box.push(format!(
+            "  {:<8}  {}",
+            style("summary").dim(),
+            style(summary).dim()
+        ));
     }
+    paths_box.render();
     println!();
 
     // ── Ollama ────────────────────────────────────────────────────────────────
-    section("Ollama");
-    kv("url", &report.ollama_url, 9);
+    let mut ollama_box = SectionBox::new("Ollama");
+    ollama_box.push(kv_str("url", &report.ollama_url, 9));
     if report.ollama_reachable {
-        kv_styled("reachable", &ok("yes"), 9);
+        ollama_box.push(kv_str("reachable", &ok("yes"), 9));
     } else {
-        kv_styled("reachable", &err("no"), 9);
+        ollama_box.push(kv_str("reachable", &err("no"), 9));
         if let Some(e) = &report.ollama_error {
-            eprintln!("  {:<9}  {}", style("error").red().bold(), style(e).red());
+            ollama_box.push(format!(
+                "  {:<9}  {}",
+                style("error").red().bold(),
+                style(e).red()
+            ));
         }
     }
+    ollama_box.render();
     println!();
 
     // ── Models ────────────────────────────────────────────────────────────────
-    section("Models");
+    let mut models_box = SectionBox::new("Models");
     match &report.installed_models {
         Some(inst) => {
-            model_row("embed", &report.embed_model, inst.embed_model_installed, 6);
-            model_row("chat", &report.chat_model, inst.chat_model_installed, 6);
-            model_row(
+            models_box.push(model_row_str(
+                "embed",
+                &report.embed_model,
+                inst.embed_model_installed,
+                6,
+            ));
+            models_box.push(model_row_str(
+                "chat",
+                &report.chat_model,
+                inst.chat_model_installed,
+                6,
+            ));
+            models_box.push(model_row_str(
                 "vision",
                 &report.vision_model,
                 inst.vision_model_installed,
                 6,
-            );
+            ));
         }
         None => {
-            kv("embed", &report.embed_model, 6);
-            kv("chat", &report.chat_model, 6);
-            kv("vision", &report.vision_model, 6);
+            models_box.push(kv_str("embed", &report.embed_model, 6));
+            models_box.push(kv_str("chat", &report.chat_model, 6));
+            models_box.push(kv_str("vision", &report.vision_model, 6));
         }
     }
+    models_box.render();
     println!();
 
     // ── Telemetry ─────────────────────────────────────────────────────────────
-    section("Telemetry");
+    let mut tel_box = SectionBox::new("Telemetry");
     let tel = &report.telemetry;
     if tel.enabled {
-        kv_styled("enabled", &ok("yes"), 14);
+        tel_box.push(kv_str("enabled", &ok("yes"), 14));
     } else {
-        kv_styled("enabled", &err("no"), 14);
+        tel_box.push(kv_str("enabled", &err("no"), 14));
     }
-    kv("service name", &tel.service_name, 14);
-    kv("protocol", &tel.protocol, 14);
+    tel_box.push(kv_str("service name", &tel.service_name, 14));
+    tel_box.push(kv_str("protocol", &tel.protocol, 14));
     if let Some(endpoint) = &tel.endpoint {
-        kv("endpoint", endpoint, 14);
+        tel_box.push(kv_str("endpoint", endpoint, 14));
     }
     if let Some(timeout_ms) = tel.timeout_ms {
-        kv("timeout (ms)", &timeout_ms.to_string(), 14);
+        tel_box.push(kv_str("timeout (ms)", &timeout_ms.to_string(), 14));
     }
     if tel.headers_configured {
-        kv_styled("headers", &ok("configured"), 14);
+        tel_box.push(kv_str("headers", &ok("configured"), 14));
     } else {
-        kv_styled("headers", &err("not configured"), 14);
+        tel_box.push(kv_str("headers", &err("not configured"), 14));
     }
     if let Some(e) = &report.telemetry_error {
-        eprintln!(
+        tel_box.push(format!(
             "  {:<14}  {}",
             style("config error").red().bold(),
             style(e).red()
-        );
+        ));
     }
+    tel_box.render();
     println!();
 
     // ── Store Layout ──────────────────────────────────────────────────────────
-    section("Store Layout");
+    let mut layout_box = SectionBox::new("Store Layout");
     let col = report
         .subdirectories
         .iter()
@@ -248,14 +274,15 @@ fn print_human(report: &DoctorReport) {
         } else {
             err("missing")
         };
-        println!(
+        layout_box.push(format!(
             "  {:<col$}  {}  {}",
             style(&sub.name).bold(),
             style(&sub.path).dim(),
             status_str,
             col = col
-        );
+        ));
     }
+    layout_box.render();
 
     print_hints(report);
 }
@@ -267,10 +294,15 @@ fn print_hints(report: &DoctorReport) {
     }
 
     println!();
-    section("Hints");
+    let mut hints_box = SectionBox::new("Hints");
     for hint in hints {
-        println!("  {} {}", style("→").yellow().bold(), style(hint).yellow());
+        hints_box.push(format!(
+            "  {} {}",
+            style("→").yellow().bold(),
+            style(&hint).yellow()
+        ));
     }
+    hints_box.render();
 }
 
 fn doctor_hints(report: &DoctorReport) -> Vec<String> {
@@ -382,51 +414,107 @@ fn model_install_hints(
         .collect()
 }
 
-/// Print a bold cyan section header.
-fn section(title: &str) {
-    println!("{}", style(title).bold().cyan());
+/// Renders a labelled section with rounded box-drawing borders.
+///
+/// ```text
+/// ╭─ Title ──────────────────────────────╮
+/// │  key   value                         │
+/// ╰──────────────────────────────────────╯
+/// ```
+struct SectionBox {
+    title: &'static str,
+    rows: Vec<String>,
 }
 
-/// Print a plain key/value row with aligned padding.
-fn kv(label: &str, value: &str, width: usize) {
-    println!("  {:<width$}  {}", style(label).dim(), value, width = width);
+impl SectionBox {
+    fn new(title: &'static str) -> Self {
+        Self {
+            title,
+            rows: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, row: impl Into<String>) {
+        self.rows.push(row.into());
+    }
+
+    fn render(&self) {
+        // Determine usable terminal width, falling back to 80.
+        let term_cols = console::Term::stdout().size().1 as usize;
+        let term_width = if term_cols < 20 { 80 } else { term_cols };
+
+        let title_visual = measure_text_width(self.title);
+        let max_row_visual = self
+            .rows
+            .iter()
+            .map(|r| measure_text_width(r))
+            .max()
+            .unwrap_or(0);
+
+        // Total box width (including the two │ borders).
+        // – content area: box_width - 4  (│·content·│)
+        // – title must fit in top border: box_width >= title_visual + 5 + 1 filler
+        let box_width = (max_row_visual + 4)
+            .max(title_visual + 6)
+            .max(42)
+            .min(term_width);
+        let inner_width = box_width - 4;
+
+        // Top border  ╭─ Title ─────────────────────╮
+        let top_fill = box_width.saturating_sub(title_visual + 5);
+        println!(
+            "╭─ {} {}╮",
+            style(self.title).bold().cyan(),
+            "─".repeat(top_fill)
+        );
+
+        // Content rows  │ …content… │
+        for row in &self.rows {
+            let visual = measure_text_width(row);
+            let pad = inner_width.saturating_sub(visual);
+            println!("│ {}{} │", row, " ".repeat(pad));
+        }
+
+        // Bottom border  ╰──────────────────────────╯
+        println!("╰{}╯", "─".repeat(box_width - 2));
+    }
 }
 
-/// Print a key/value row where the value is already a styled string.
-fn kv_styled(label: &str, value: &str, width: usize) {
-    println!("  {:<width$}  {}", style(label).dim(), value, width = width);
+/// Build a plain key/value row string with aligned padding.
+fn kv_str(label: &str, value: &str, width: usize) -> String {
+    format!("  {:<width$}  {}", style(label).dim(), value, width = width)
 }
 
-/// Print a path row: label  path  ✓/✗ status.
-fn path_row(label: &str, report: &PathStatusReport, width: usize) {
+/// Build a path row string: label  path  ✓/✗ status.
+fn path_row_str(label: &str, report: &PathStatusReport, width: usize) -> String {
     let status_str = if report.status == "exists" {
         ok("exists")
     } else {
         err("missing")
     };
-    println!(
+    format!(
         "  {:<width$}  {}  {}",
         style(label).dim(),
         style(&report.path).dim(),
         status_str,
         width = width
-    );
+    )
 }
 
-/// Print a model row: label  model-name  ✓/✗ installed.
-fn model_row(label: &str, model: &str, installed: bool, width: usize) {
+/// Build a model row string: label  model-name  ✓/✗ installed.
+fn model_row_str(label: &str, model: &str, installed: bool, width: usize) -> String {
     let status_str = if installed {
         ok("installed")
     } else {
         err("not installed")
     };
-    println!(
+    format!(
         "  {:<width$}  {:<30}  {}",
         style(label).dim(),
         model,
         status_str,
         width = width
-    );
+    )
 }
 
 /// Green ✓ prefix with text.
