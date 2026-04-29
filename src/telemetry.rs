@@ -8,7 +8,10 @@ use reqwest::blocking::Client;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-const DEFAULT_FILTER: &str = "info";
+// Keep CLI output quiet by default. Users can opt into operational logs with RUST_LOG=info.
+const DEFAULT_CONSOLE_FILTER: &str = "warn";
+// Preserve useful OTLP traces when telemetry is explicitly enabled.
+const DEFAULT_TRACE_FILTER: &str = "info";
 const DEFAULT_SERVICE_NAME: &str = env!("CARGO_PKG_NAME");
 const SERVICE_VERSION_KEY: &str = "service.version";
 const HTTP_TRACES_PATH: &str = "/v1/traces";
@@ -165,13 +168,13 @@ impl Drop for TelemetryGuard {
 }
 
 pub fn init() -> Result<TelemetryGuard> {
-    let filter = build_env_filter();
     let config = TelemetryConfig::from_env()?;
-    let fmt_layer = fmt::layer().with_writer(std::io::stderr);
+    let fmt_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(build_env_filter(DEFAULT_CONSOLE_FILTER));
 
     if !config.enabled {
         tracing_subscriber::registry()
-            .with(filter)
             .with(fmt_layer)
             .try_init()
             .context("initialize tracing subscriber")?;
@@ -180,11 +183,12 @@ pub fn init() -> Result<TelemetryGuard> {
 
     let tracer_provider = build_tracer_provider(&config)?;
     let tracer = tracer_provider.tracer(DEFAULT_SERVICE_NAME.to_string());
+    let otel_layer =
+        OpenTelemetryLayer::new(tracer).with_filter(build_env_filter(DEFAULT_TRACE_FILTER));
 
     tracing_subscriber::registry()
-        .with(filter)
         .with(fmt_layer)
-        .with(OpenTelemetryLayer::new(tracer))
+        .with(otel_layer)
         .try_init()
         .context("initialize tracing subscriber")?;
 
@@ -240,18 +244,18 @@ fn timeout_or_default(timeout_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(timeout_ms.unwrap_or(10_000))
 }
 
-fn build_env_filter() -> EnvFilter {
+fn build_env_filter(default_filter: &'static str) -> EnvFilter {
     match std::env::var("RUST_LOG") {
         Ok(value) => EnvFilter::try_new(&value).unwrap_or_else(|err| {
-            eprintln!("failed to parse RUST_LOG, using default '{DEFAULT_FILTER}' filter: {err}");
-            EnvFilter::new(DEFAULT_FILTER)
+            eprintln!("failed to parse RUST_LOG, using default '{default_filter}' filter: {err}");
+            EnvFilter::new(default_filter)
         }),
-        Err(std::env::VarError::NotPresent) => EnvFilter::new(DEFAULT_FILTER),
+        Err(std::env::VarError::NotPresent) => EnvFilter::new(default_filter),
         Err(std::env::VarError::NotUnicode(_)) => {
             eprintln!(
-                "failed to parse RUST_LOG, using default '{DEFAULT_FILTER}' filter: not valid unicode"
+                "failed to parse RUST_LOG, using default '{default_filter}' filter: not valid unicode"
             );
-            EnvFilter::new(DEFAULT_FILTER)
+            EnvFilter::new(default_filter)
         }
     }
 }
