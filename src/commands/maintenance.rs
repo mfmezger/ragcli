@@ -130,6 +130,10 @@ fn source_prune_path(source: &IndexedSourceSummary) -> Result<PathBuf> {
 }
 
 fn source_is_missing(source: &IndexedSourceSummary) -> Result<bool> {
+    if source.source_path.starts_with("http://") || source.source_path.starts_with("https://") {
+        return Ok(false);
+    }
+
     let path = source_prune_path(source)?;
     Ok(!path
         .try_exists()

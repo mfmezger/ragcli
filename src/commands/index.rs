@@ -3,7 +3,7 @@ use crate::config::{
     ensure_store_layout, load_or_create_config, normalize_chunk_settings, resolve_model_name,
     store_dir,
 };
-use crate::ingest::{ingest_path, PdfParser};
+use crate::ingest::{ingest_path, ingest_url, is_web_url, PdfParser};
 use crate::models::{Embedder, VisionCaptioner};
 use crate::store::{connect_db, ensure_metadata, load_source_fingerprints, replace_source_rows};
 use crate::ui::{self, Panel};
@@ -72,29 +72,50 @@ pub async fn run(
             PdfParserArg::Native => PdfParser::Native,
             PdfParserArg::Liteparse => PdfParser::Liteparse,
         };
-        let ingest_span = tracing::info_span!(
-            "ingest_path",
-            path = %path.display(),
-            chunk_size = size,
-            chunk_overlap = overlap,
-            parser = ?parser,
-            include_hidden,
-            force,
-        );
-        let result = ingest_path(
-            &path,
-            size,
-            overlap,
-            &embedder,
-            Some(&vision),
-            parser,
-            &exclude,
-            include_hidden,
-            &existing_fingerprints,
-            force,
-        )
-        .instrument(ingest_span)
-        .await?;
+        let input = path.to_string_lossy();
+        let result = if is_web_url(&input) {
+            let ingest_span = tracing::info_span!(
+                "ingest_url",
+                url = %input,
+                chunk_size = size,
+                chunk_overlap = overlap,
+                force,
+            );
+            ingest_url(
+                &input,
+                size,
+                overlap,
+                &embedder,
+                &existing_fingerprints,
+                force,
+            )
+            .instrument(ingest_span)
+            .await?
+        } else {
+            let ingest_span = tracing::info_span!(
+                "ingest_path",
+                path = %path.display(),
+                chunk_size = size,
+                chunk_overlap = overlap,
+                parser = ?parser,
+                include_hidden,
+                force,
+            );
+            ingest_path(
+                &path,
+                size,
+                overlap,
+                &embedder,
+                Some(&vision),
+                parser,
+                &exclude,
+                include_hidden,
+                &existing_fingerprints,
+                force,
+            )
+            .instrument(ingest_span)
+            .await?
+        };
 
         if let Some(dim) = result.embedding_dim {
             ensure_metadata(&store, &embed_model_name, dim, size, overlap)?;

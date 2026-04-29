@@ -37,9 +37,9 @@ pub struct Cli {
 /// Supported `ragcli` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Indexes a file or directory into the local store.
+    /// Indexes a file, directory, or HTTP(S) URL into the local store.
     Index {
-        /// Path to a file or directory to index.
+        /// Path to a file, directory, or HTTP(S) URL to index.
         path: PathBuf,
         /// Overrides the chunk size in characters.
         #[arg(long)]

@@ -48,6 +48,11 @@ impl SourceKind {
     ///
     /// Extension matching is case-insensitive. Unknown extensions yield `Unsupported`.
     pub fn from_path(path: &Path) -> Self {
+        let source = path.to_string_lossy();
+        if source.starts_with("http://") || source.starts_with("https://") {
+            return Self::Html;
+        }
+
         let ext = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -131,6 +136,10 @@ mod tests {
         );
         assert_eq!(
             SourceKind::from_path(Path::new("page.html")),
+            SourceKind::Html
+        );
+        assert_eq!(
+            SourceKind::from_path(Path::new("https://example.com/docs")),
             SourceKind::Html
         );
         assert_eq!(

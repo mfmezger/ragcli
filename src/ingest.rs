@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use pdf_extract::extract_text_by_pages;
+use reqwest::header::{CONTENT_TYPE, USER_AGENT};
+use reqwest::Url;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -14,7 +16,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use walkdir::{DirEntry, WalkDir};
 
 /// Aggregated indexing counters for a single ingest run.
@@ -42,6 +44,8 @@ pub struct IngestResult {
 }
 
 const MIN_CONTEXT_RETRY_CHARS: usize = 8;
+const WEB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const WEB_USER_AGENT: &str = "ragcli/0.1";
 
 #[derive(Debug, Clone)]
 struct ChunkContent {
@@ -65,6 +69,116 @@ pub enum PdfParser {
 struct IngestOptions {
     excludes: GlobSet,
     include_hidden: bool,
+}
+
+pub fn is_web_url(input: &str) -> bool {
+    Url::parse(input).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Fetches and indexes one web page into chunk rows.
+pub async fn ingest_url(
+    url: &str,
+    chunk_size: usize,
+    overlap: usize,
+    embedder: &Embedder,
+    existing_fingerprints: &BTreeMap<String, SourceFingerprint>,
+    force: bool,
+) -> Result<IngestResult> {
+    let url = parse_web_url(url)?;
+    let progress = build_progress_bar(1);
+    let mut dim = None;
+    let mut stats = IndexStats {
+        indexed_files: 0,
+        skipped_files: 0,
+        total_chunks: 0,
+        errors: Vec::new(),
+    };
+
+    progress.set_message(format!("Fetching {url}"));
+    let page = match fetch_web_page(url).await {
+        Ok(page) => page,
+        Err(err) => {
+            stats.skipped_files += 1;
+            stats.errors.push(err.to_string());
+            progress.finish_with_message("Indexed 0 web page(s), wrote 0 chunk(s)");
+            return Ok(IngestResult {
+                rows: Vec::new(),
+                source_paths: Vec::new(),
+                embedding_dim: None,
+                stats,
+            });
+        }
+    };
+
+    let source_fingerprint = fingerprint_web_page(&page);
+    if !force
+        && existing_fingerprints
+            .get(&page.url)
+            .is_some_and(|existing| existing == &source_fingerprint)
+    {
+        stats.skipped_files += 1;
+        progress.finish_with_message("Skipped unchanged web page");
+        return Ok(IngestResult {
+            rows: Vec::new(),
+            source_paths: Vec::new(),
+            embedding_dim: None,
+            stats,
+        });
+    }
+
+    let chunks = chunk_web_page(&page, chunk_size, overlap);
+    if chunks.is_empty() {
+        stats.skipped_files += 1;
+        stats
+            .errors
+            .push(format!("{}: no readable text found", page.url));
+        progress.finish_with_message("Indexed 0 web page(s), wrote 0 chunk(s)");
+        return Ok(IngestResult {
+            rows: Vec::new(),
+            source_paths: Vec::new(),
+            embedding_dim: None,
+            stats,
+        });
+    }
+
+    progress.set_message(format!("Embedding {}", page.url));
+    let rows = match embed_chunks(
+        Path::new(&page.url),
+        &source_fingerprint,
+        0,
+        chunks,
+        embedder,
+        &mut dim,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            stats.skipped_files += 1;
+            stats.errors.push(format!("{}: {}", page.url, err));
+            progress.finish_with_message("Indexed 0 web page(s), wrote 0 chunk(s)");
+            return Ok(IngestResult {
+                rows: Vec::new(),
+                source_paths: Vec::new(),
+                embedding_dim: dim,
+                stats,
+            });
+        }
+    };
+
+    stats.indexed_files += 1;
+    stats.total_chunks += rows.len();
+    progress.finish_with_message(format!(
+        "Indexed {} web page(s), wrote {} chunk(s)",
+        stats.indexed_files, stats.total_chunks
+    ));
+
+    Ok(IngestResult {
+        rows,
+        source_paths: vec![page.url],
+        embedding_dim: dim,
+        stats,
+    })
 }
 
 /// Walks a file or directory, extracts supported content, and returns chunk rows.
@@ -572,9 +686,119 @@ fn load_text_file(path: &Path) -> Result<String> {
 
 fn load_html_file(path: &Path) -> Result<String> {
     let html = load_text_file(path)?;
+    render_html_text(&html)
+}
+
+struct WebPage {
+    url: String,
+    title: Option<String>,
+    content_type: Option<String>,
+    raw_len: u64,
+    text: String,
+}
+
+fn parse_web_url(input: &str) -> Result<Url> {
+    let url = Url::parse(input).with_context(|| format!("parse URL: {input}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!(
+            "unsupported URL scheme `{}`; expected http or https",
+            url.scheme()
+        );
+    }
+    Ok(url)
+}
+
+async fn fetch_web_page(url: Url) -> Result<WebPage> {
+    let client = reqwest::Client::builder()
+        .timeout(WEB_FETCH_TIMEOUT)
+        .build()
+        .context("build web fetch client")?;
+    let response = client
+        .get(url)
+        .header(USER_AGENT, WEB_USER_AGENT)
+        .send()
+        .await
+        .context("fetch web page")?;
+    let status = response.status();
+    if !status.is_success() {
+        anyhow::bail!("fetch web page failed with HTTP {status}");
+    }
+
+    let final_url = response.url().to_string();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response.text().await.context("read web page body")?;
+    let title = extract_html_title(&body);
+    let text = if content_type
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/plain"))
+    {
+        body.trim().to_string()
+    } else {
+        render_html_text(&body)?
+    };
+    let text = match (title.as_deref(), text.trim()) {
+        (Some(title), "") => title.to_string(),
+        (Some(title), text) if !text.contains(title) => format!("{title}\n\n{text}"),
+        (_, text) => text.to_string(),
+    };
+
+    Ok(WebPage {
+        url: final_url,
+        title,
+        content_type,
+        raw_len: body.len() as u64,
+        text,
+    })
+}
+
+fn render_html_text(html: &str) -> Result<String> {
     let rendered =
         html2text::from_read(html.as_bytes(), usize::MAX).context("render html as text")?;
     Ok(rendered.trim().to_string())
+}
+
+fn extract_html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after_start = &html[start..];
+    let title_body_start = after_start.find('>')? + start + 1;
+    let end = lower[title_body_start..].find("</title>")? + title_body_start;
+    let title = html[title_body_start..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!title.is_empty()).then_some(title)
+}
+
+fn fingerprint_web_page(page: &WebPage) -> SourceFingerprint {
+    let mut hasher = Sha256::new();
+    hasher.update(page.url.as_bytes());
+    hasher.update(page.text.as_bytes());
+    SourceFingerprint {
+        fingerprint: to_hex(&hasher.finalize()),
+        size_bytes: page.raw_len,
+        modified_unix_ms: 0,
+    }
+}
+
+fn chunk_web_page(page: &WebPage, chunk_size: usize, overlap: usize) -> Vec<ChunkContent> {
+    let mut chunks = chunk_document_text(&page.text, "html", None, chunk_size, overlap);
+    for chunk in &mut chunks {
+        if let Some(obj) = chunk.metadata.as_object_mut() {
+            obj.insert("url".to_string(), json!(page.url));
+            if let Some(title) = &page.title {
+                obj.insert("title".to_string(), json!(title));
+            }
+            if let Some(content_type) = &page.content_type {
+                obj.insert("content_type".to_string(), json!(content_type));
+            }
+        }
+    }
+    chunks
 }
 
 fn load_delimited_file(path: &Path, delimiter: u8) -> Result<String> {
@@ -1118,17 +1342,27 @@ mod tests {
     use std::thread;
 
     fn one_shot_json_server(status_line: &str, body: &'static str) -> String {
+        one_shot_http_server(status_line, "application/json", body)
+    }
+
+    fn one_shot_html_server(body: &'static str) -> String {
+        one_shot_http_server("200 OK", "text/html; charset=utf-8", body)
+    }
+
+    fn one_shot_http_server(status_line: &str, content_type: &str, body: &'static str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().unwrap();
         let status_line = status_line.to_string();
+        let content_type = content_type.to_string();
 
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept request");
             let mut buf = [0_u8; 4096];
             let _ = stream.read(&mut buf);
             let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 status_line,
+                content_type,
                 body.len(),
                 body
             );
@@ -1214,6 +1448,14 @@ mod tests {
         haystack
             .windows(needle.len())
             .position(|window| window == needle)
+    }
+
+    #[test]
+    fn test_is_web_url_detects_http_and_https_only() {
+        assert!(is_web_url("https://example.com/docs"));
+        assert!(is_web_url("http://example.com"));
+        assert!(!is_web_url("file:///tmp/index.html"));
+        assert!(!is_web_url("notes/index.html"));
     }
 
     #[test]
@@ -1528,6 +1770,30 @@ mod tests {
         assert_eq!(result.stats.indexed_files, 0);
         assert_eq!(result.stats.skipped_files, 1);
         assert!(result.stats.errors[0].contains("broken.pdf"));
+    }
+
+    #[tokio::test]
+    async fn test_ingest_url_indexes_single_html_page() {
+        let page_url = one_shot_html_server(
+            "<html><head><title>Guide</title></head><body><h1>Guide</h1><p>Hello web.</p></body></html>",
+        );
+        let base_url = one_shot_json_server("200 OK", r#"{"embeddings":[[0.1,0.2]]}"#);
+        let embedder = Embedder::new(base_url, "embed".to_string());
+
+        let result = ingest_url(&page_url, 100, 0, &embedder, &BTreeMap::new(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.stats.indexed_files, 1);
+        assert_eq!(result.stats.skipped_files, 0);
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.source_paths[0].starts_with(&page_url));
+        assert!(result.rows[0].source_path.starts_with(&page_url));
+        assert_eq!(result.rows[0].format, "html");
+        assert!(result.rows[0].chunk_text.contains("Guide"));
+        assert!(result.rows[0].chunk_text.contains("Hello web."));
+        assert!(result.rows[0].metadata.contains("\"title\":\"Guide\""));
+        assert!(result.rows[0].metadata.contains("\"url\":"));
     }
 
     #[tokio::test]
