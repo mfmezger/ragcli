@@ -780,10 +780,10 @@ pub fn strip_thinking(text: &str) -> String {
 fn get_col<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
     batch
         .column_by_name(name)
-        .with_context(|| format!("{name} column missing"))?
+        .with_context(|| format!("column '{name}' missing from record batch"))?
         .as_any()
         .downcast_ref::<T>()
-        .with_context(|| format!("{name} column type"))
+        .with_context(|| format!("column '{name}' has an unexpected type"))
 }
 
 fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
