@@ -777,22 +777,21 @@ pub fn strip_thinking(text: &str) -> String {
     text.to_string()
 }
 
-fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+fn get_col<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
     batch
         .column_by_name(name)
         .with_context(|| format!("{name} column missing"))?
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<T>()
         .with_context(|| format!("{name} column type"))
 }
 
+fn string_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+    get_col::<StringArray>(batch, name)
+}
+
 fn int32_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
-    batch
-        .column_by_name(name)
-        .with_context(|| format!("{name} column missing"))?
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .with_context(|| format!("{name} column type"))
+    get_col::<Int32Array>(batch, name)
 }
 
 fn build_source_delete_filter(source_paths: &[String]) -> Option<String> {
