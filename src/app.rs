@@ -75,7 +75,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 );
                 commands::query::run(
                     name,
-                    commands::query::QueryCommand::new(
+                    commands::query::QueryCommand {
                         question,
                         mode,
                         top_k,
@@ -94,7 +94,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         format,
                         gen_model,
                         max_tokens,
-                    ),
+                    },
                 )
                 .instrument(span)
                 .await?
