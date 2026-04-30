@@ -364,23 +364,18 @@ impl HttpClient {
     }
 
     async fn get_text(&self, url: String) -> Result<(reqwest::StatusCode, String)> {
-        let mut last_err = None;
-        for attempt in 0..=MAX_RETRIES {
+        for attempt in 0..MAX_RETRIES {
             let result = self.get_text_once(&url).await;
-            if should_retry(&result, attempt) {
-                last_err = Some(clone_result_error(&result));
+            if should_retry(&result) {
                 sleep(backoff_duration(attempt)).await;
                 continue;
             }
             return result;
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("GET request retries exhausted")))
+        self.get_text_once(&url).await
     }
 
-    async fn get_text_once(
-        &self,
-        url: &str,
-    ) -> Result<(reqwest::StatusCode, String)> {
+    async fn get_text_once(&self, url: &str) -> Result<(reqwest::StatusCode, String)> {
         let response = match self {
             Self::Reqwest(client) => client
                 .get(url)
@@ -398,30 +393,28 @@ impl HttpClient {
         url: String,
         body: serde_json::Value,
     ) -> Result<(reqwest::StatusCode, String)> {
-        let mut last_err = None;
-        for attempt in 0..=MAX_RETRIES {
-            let result = self.post_json_once(&url, &body).await;
-            if should_retry(&result, attempt) {
-                last_err = Some(clone_result_error(&result));
+        let json_body = body.to_string();
+        for attempt in 0..MAX_RETRIES {
+            let result = self.post_json_once(&url, &json_body).await;
+            if should_retry(&result) {
                 sleep(backoff_duration(attempt)).await;
                 continue;
             }
             return result;
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("POST request retries exhausted")))
+        self.post_json_once(&url, &json_body).await
     }
 
     async fn post_json_once(
         &self,
         url: &str,
-        body: &serde_json::Value,
+        json_body: &str,
     ) -> Result<(reqwest::StatusCode, String)> {
-        let json_body = body.to_string();
         let response = match self {
             Self::Reqwest(client) => client
                 .post(url)
                 .header(CONTENT_TYPE, "application/json")
-                .body(json_body)
+                .body(json_body.to_string())
                 .send()
                 .await
                 .context("send HTTP POST request")?,
@@ -432,20 +425,10 @@ impl HttpClient {
     }
 }
 
-fn should_retry(result: &Result<(reqwest::StatusCode, String)>, attempt: u32) -> bool {
-    if attempt >= MAX_RETRIES {
-        return false;
-    }
+fn should_retry(result: &Result<(reqwest::StatusCode, String)>) -> bool {
     match result {
         Err(err) => is_connection_error(err),
         Ok((status, _)) => status.is_server_error(),
-    }
-}
-
-fn clone_result_error(result: &Result<(reqwest::StatusCode, String)>) -> anyhow::Error {
-    match result {
-        Err(err) => anyhow::anyhow!("{err:#}"),
-        Ok((status, body)) => anyhow::anyhow!("HTTP {status}: {body}"),
     }
 }
 
@@ -455,13 +438,24 @@ fn backoff_duration(attempt: u32) -> Duration {
 
 fn is_connection_error(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            return reqwest_err.is_connect() || reqwest_err.is_timeout();
+        }
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_err.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::TimedOut
+            );
+        }
+
         let msg = cause.to_string().to_ascii_lowercase();
         msg.contains("connection refused")
             || msg.contains("connection reset")
             || msg.contains("broken pipe")
             || msg.contains("connect error")
-            || msg.contains("error sending request")
-            || msg.contains("send http")
     })
 }
 
@@ -770,24 +764,25 @@ mod tests {
 
     #[test]
     fn test_should_retry_returns_true_for_server_errors() {
-        let result: Result<(reqwest::StatusCode, String)> =
-            Ok((reqwest::StatusCode::INTERNAL_SERVER_ERROR, "error".to_string()));
-        assert!(should_retry(&result, 0));
-        assert!(!should_retry(&result, MAX_RETRIES));
+        let result: Result<(reqwest::StatusCode, String)> = Ok((
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "error".to_string(),
+        ));
+        assert!(should_retry(&result));
     }
 
     #[test]
     fn test_should_retry_returns_false_for_client_errors() {
         let result: Result<(reqwest::StatusCode, String)> =
             Ok((reqwest::StatusCode::NOT_FOUND, "error".to_string()));
-        assert!(!should_retry(&result, 0));
+        assert!(!should_retry(&result));
     }
 
     #[test]
     fn test_should_retry_returns_true_for_connection_errors() {
         let result: Result<(reqwest::StatusCode, String)> =
             Err(anyhow::anyhow!("error sending request: connection refused"));
-        assert!(should_retry(&result, 0));
+        assert!(should_retry(&result));
     }
 
     #[test]
@@ -802,7 +797,10 @@ mod tests {
         assert!(is_connection_error(&anyhow::anyhow!("connection refused")));
         assert!(is_connection_error(&anyhow::anyhow!("connection reset by peer")));
         assert!(is_connection_error(&anyhow::anyhow!("broken pipe")));
-        assert!(is_connection_error(&anyhow::anyhow!("Error sending request")));
+        assert!(is_connection_error(&anyhow::anyhow!(std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        ))));
+        assert!(!is_connection_error(&anyhow::anyhow!("error sending request")));
         assert!(!is_connection_error(&anyhow::anyhow!("model not found")));
     }
 }

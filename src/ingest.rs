@@ -1397,7 +1397,11 @@ mod tests {
     use std::thread;
 
     fn one_shot_json_server(status_line: &str, body: &'static str) -> String {
-        one_shot_http_server(status_line, "application/json", body)
+        repeated_json_server(status_line, body, 1)
+    }
+
+    fn repeated_json_server(status_line: &str, body: &'static str, max_requests: usize) -> String {
+        repeated_http_server(status_line, "application/json", body, max_requests)
     }
 
     fn one_shot_html_server(body: &'static str) -> String {
@@ -1405,25 +1409,36 @@ mod tests {
     }
 
     fn one_shot_http_server(status_line: &str, content_type: &str, body: &'static str) -> String {
+        repeated_http_server(status_line, content_type, body, 1)
+    }
+
+    fn repeated_http_server(
+        status_line: &str,
+        content_type: &str,
+        body: &'static str,
+        max_requests: usize,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let addr = listener.local_addr().unwrap();
         let status_line = status_line.to_string();
         let content_type = content_type.to_string();
 
         thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept request");
-            let mut buf = [0_u8; 4096];
-            let _ = stream.read(&mut buf);
-            let response = format!(
-                "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                status_line,
-                content_type,
-                body.len(),
-                body
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("write response");
+            for stream in listener.incoming().take(max_requests) {
+                let mut stream = stream.expect("accept request");
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status_line,
+                    content_type,
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
         });
 
         format!("http://{}", addr)
@@ -2037,7 +2052,7 @@ mod tests {
         let text = dir.path().join("note.txt");
         fs::write(&text, "hello world").unwrap();
 
-        let base_url = one_shot_json_server("500 Internal Server Error", r#"{"error":"boom"}"#);
+        let base_url = repeated_json_server("500 Internal Server Error", r#"{"error":"boom"}"#, 3);
         let embedder = Embedder::new(base_url, "embed".to_string());
         let result = ingest_path(
             &text,
