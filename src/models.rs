@@ -367,7 +367,9 @@ impl HttpClient {
         for attempt in 0..MAX_RETRIES {
             let result = self.get_text_once(&url).await;
             if should_retry(&result) {
-                sleep(backoff_duration(attempt)).await;
+                let delay = backoff_duration(attempt);
+                log_retry("GET", &url, &result, attempt, delay);
+                sleep(delay).await;
                 continue;
             }
             return result;
@@ -397,7 +399,9 @@ impl HttpClient {
         for attempt in 0..MAX_RETRIES {
             let result = self.post_json_once(&url, &json_body).await;
             if should_retry(&result) {
-                sleep(backoff_duration(attempt)).await;
+                let delay = backoff_duration(attempt);
+                log_retry("POST", &url, &result, attempt, delay);
+                sleep(delay).await;
                 continue;
             }
             return result;
@@ -434,6 +438,40 @@ fn should_retry(result: &Result<(reqwest::StatusCode, String)>) -> bool {
 
 fn backoff_duration(attempt: u32) -> Duration {
     INITIAL_BACKOFF * 2u32.saturating_pow(attempt)
+}
+
+fn log_retry(
+    method: &str,
+    url: &str,
+    result: &Result<(reqwest::StatusCode, String)>,
+    attempt: u32,
+    delay: Duration,
+) {
+    let retry = attempt + 1;
+    let total_attempts = MAX_RETRIES + 1;
+    let delay_ms = delay.as_millis() as u64;
+    match result {
+        Err(err) => tracing::warn!(
+            method = %method,
+            url = %url,
+            retry,
+            max_retries = MAX_RETRIES,
+            total_attempts,
+            delay_ms,
+            error = %err,
+            "Ollama request failed; retrying"
+        ),
+        Ok((status, _)) => tracing::warn!(
+            method = %method,
+            url = %url,
+            retry,
+            max_retries = MAX_RETRIES,
+            total_attempts,
+            delay_ms,
+            status = %status,
+            "Ollama request returned retryable status; retrying"
+        ),
+    }
 }
 
 fn is_connection_error(err: &anyhow::Error) -> bool {
