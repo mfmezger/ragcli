@@ -59,28 +59,34 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
         span_inner.record("hit_count", result.hits.len());
         span_inner.record("iteration_count", result.iterations.len());
 
+        if result.hits.is_empty() {
+            if command.json {
+                let report = QueryJsonReport::from_result(
+                    &command.question,
+                    mode_label(command.mode),
+                    &result,
+                );
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let mut panel = Panel::new("Query Result");
+                panel.kv("status", "No relevant context found in the local store.", 8);
+                panel.render();
+            }
+            return Ok(());
+        }
+
         if command.json {
             let answer = match &result.answer {
                 Some(answer) => answer.clone(),
                 None => generate_answer(&runtime, &command, &result).await?,
             };
-            let report = QueryJsonReport::from_result(
-                &command.question,
-                mode_label(command.mode),
-                &result,
-            );
+            let report =
+                QueryJsonReport::from_result(&command.question, mode_label(command.mode), &result);
             let report = QueryJsonReport {
                 answer: Some(store::strip_thinking(&answer)),
                 ..report
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
-            return Ok(());
-        }
-
-        if result.hits.is_empty() {
-            let mut panel = Panel::new("Query Result");
-            panel.kv("status", "No relevant context found in the local store.", 8);
-            panel.render();
             return Ok(());
         }
 
@@ -234,6 +240,21 @@ async fn run_agentic_query_command(
         }
 
         let final_hits = prune_candidates(accumulated_hits, command.top_k);
+        if final_hits.is_empty() {
+            trace.push("no evidence retained; skipping answer generation".to_string());
+            return Ok(QueryResult {
+                requested_mode: command.mode,
+                execution_label: "agentic",
+                rewrite_set,
+                plan: Some(plan),
+                iterations,
+                support_check: None,
+                answer: None,
+                hits: final_hits,
+                trace,
+            });
+        }
+
         let answer = generate_answer_from_hits(runtime, command, &final_hits).await?;
         let support_check = match verify_answer_support(
             &generator,

@@ -79,11 +79,7 @@ pub(crate) struct SupportCheckJson {
 }
 
 impl QueryJsonReport {
-    pub(crate) fn from_result(
-        question: &str,
-        mode: &str,
-        result: &QueryResult,
-    ) -> Self {
+    pub(crate) fn from_result(question: &str, mode: &str, result: &QueryResult) -> Self {
         Self {
             question: question.to_string(),
             answer: result.answer.clone(),
