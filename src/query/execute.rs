@@ -65,6 +65,7 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
                     &command.question,
                     mode_label(command.mode),
                     &result,
+                    None,
                 );
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -76,16 +77,13 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
         }
 
         if command.json {
-            let answer = match &result.answer {
-                Some(answer) => answer.clone(),
-                None => generate_answer(&runtime, &command, &result).await?,
-            };
-            let report =
-                QueryJsonReport::from_result(&command.question, mode_label(command.mode), &result);
-            let report = QueryJsonReport {
-                answer: Some(store::strip_thinking(&answer)),
-                ..report
-            };
+            let answer = stripped_answer(&runtime, &command, &result).await?;
+            let report = QueryJsonReport::from_result(
+                &command.question,
+                mode_label(command.mode),
+                &result,
+                Some(answer),
+            );
             println!("{}", serde_json::to_string_pretty(&report)?);
             return Ok(());
         }
@@ -96,13 +94,10 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
         print_citations(&command, &result);
         print_contexts(&command, &result);
 
-        let answer = match &result.answer {
-            Some(answer) => answer.clone(),
-            None => generate_answer(&runtime, &command, &result).await?,
-        };
+        let answer = stripped_answer(&runtime, &command, &result).await?;
         println!();
         let mut panel = Panel::new("Answer");
-        panel.prose("", store::strip_thinking(&answer).trim(), 0);
+        panel.prose("", answer.trim(), 0);
         panel.render();
         Ok(())
     }
@@ -375,12 +370,16 @@ async fn build_rewrite_set(
     .await
 }
 
-async fn generate_answer(
+async fn stripped_answer(
     runtime: &QueryRuntime,
     command: &QueryCommand,
     result: &QueryResult,
 ) -> Result<String> {
-    generate_answer_from_hits(runtime, command, &result.hits).await
+    let answer = match &result.answer {
+        Some(answer) => answer.clone(),
+        None => generate_answer_from_hits(runtime, command, &result.hits).await?,
+    };
+    Ok(store::strip_thinking(&answer))
 }
 
 async fn generate_answer_from_hits(
