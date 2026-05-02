@@ -20,8 +20,8 @@ fn test_live_ollama_index_and_query_smoke() {
     )
     .unwrap();
 
-    let ollama_url = std::env::var("RAGCLI_OLLAMA_URL")
-        .unwrap_or_else(|_| "http://localhost:11434".to_string());
+    let ollama_url =
+        std::env::var("RAGCLI_OLLAMA_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let env = [("RAGCLI_OLLAMA_URL", ollama_url.as_str())];
 
     let index = run_ragcli(
