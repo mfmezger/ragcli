@@ -49,11 +49,7 @@ fn test_index_sources_and_stat_cover_store_lifecycle() {
     assert!(source_paths.iter().any(|path| path.ends_with("nebula.md")));
     assert!(source_paths.iter().any(|path| path.ends_with("orchard.md")));
 
-    let stat = run_ragcli(
-        dir.path(),
-        &env,
-        ["--name", "lifecycle", "stat", "--json"],
-    );
+    let stat = run_ragcli(dir.path(), &env, ["--name", "lifecycle", "stat", "--json"]);
     stat.assert_success();
     let stat_json = stat.json();
     assert_eq!(stat_json["stats"]["total_chunks"], 2);

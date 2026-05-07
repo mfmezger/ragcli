@@ -16,7 +16,7 @@ use crate::jsonutil::parse_json;
 use crate::models::Generator;
 use crate::retrieval::RetrievalCandidate;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const SUMMARY_TEXT_MAX_CHARS: usize = 600;
 
@@ -37,7 +37,8 @@ pub struct AgentQueryConfig {
 }
 
 /// Class of a user question, influencing which retrieval strategy is selected.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum QuestionType {
     /// A single factual lookup — "What is X?"
     Lookup,
@@ -52,7 +53,8 @@ pub enum QuestionType {
 }
 
 /// Retrieval strategy selected by the query planner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum RetrievalStrategy {
     /// Use the original question directly against the store.
     Direct,
@@ -78,7 +80,8 @@ pub struct QueryPlan {
 }
 
 /// Result of an LLM evidence assessment.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum EvidenceVerdict {
     /// Retrieved candidates fully cover what is needed to answer.
     Sufficient,

@@ -58,6 +58,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 format,
                 gen_model,
                 max_tokens,
+                json,
             } => {
                 let span = tracing::info_span!(
                     "query_command",
@@ -94,6 +95,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         format,
                         gen_model,
                         max_tokens,
+                        json,
                     },
                 )
                 .instrument(span)

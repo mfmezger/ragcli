@@ -1,8 +1,11 @@
-use crate::agent::{AgentIteration, QueryPlan, SupportCheck};
+use crate::agent::{
+    AgentIteration, EvidenceVerdict, QueryPlan, QuestionType, RetrievalStrategy, SupportCheck,
+};
 use crate::cli::QueryModeArg;
 use crate::config::Config;
 use crate::retrieval::RetrievalCandidate;
 use crate::rewrite::QueryRewriteSet;
+use serde::Serialize;
 use std::path::PathBuf;
 
 pub(crate) struct QueryRuntime {
@@ -30,4 +33,130 @@ pub(crate) enum QueryExecutionPath {
     Simple,
     Agentic,
     AgenticStub,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct QueryJsonReport {
+    pub question: String,
+    pub answer: Option<String>,
+    pub mode: String,
+    pub hits: Vec<HitJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub iterations: Vec<IterationJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub support_check: Option<SupportCheckJson>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct HitJson {
+    pub source: String,
+    pub page: i32,
+    pub chunk_index: i32,
+    pub score: Option<f32>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PlanJson {
+    pub question_type: QuestionType,
+    pub strategy: RetrievalStrategy,
+    pub reasoning: String,
+    pub subqueries: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct IterationJson {
+    pub iteration: usize,
+    pub verdict: EvidenceVerdict,
+    pub retrieved: usize,
+    pub kept: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SupportCheckJson {
+    pub supported: bool,
+    pub unsupported_claims: Vec<String>,
+}
+
+impl QueryJsonReport {
+    pub(crate) fn from_result(
+        question: &str,
+        mode: &str,
+        result: &QueryResult,
+        answer: Option<String>,
+    ) -> Self {
+        Self {
+            question: question.to_string(),
+            answer,
+            mode: mode.to_string(),
+            hits: result
+                .hits
+                .iter()
+                .map(|hit| HitJson {
+                    source: hit.source_path.clone(),
+                    page: hit.page,
+                    chunk_index: hit.chunk_index,
+                    score: hit.best_score(),
+                    text: hit.chunk_text.clone(),
+                })
+                .collect(),
+            plan: result.plan.as_ref().map(|plan| PlanJson {
+                question_type: plan.question_type.clone(),
+                strategy: plan.strategy.clone(),
+                reasoning: plan.reasoning.clone(),
+                subqueries: plan.subqueries.clone(),
+            }),
+            iterations: result
+                .iterations
+                .iter()
+                .map(|iter| IterationJson {
+                    iteration: iter.iteration,
+                    verdict: iter.sufficiency.clone(),
+                    retrieved: iter.retrieved_count,
+                    kept: iter.kept_count,
+                })
+                .collect(),
+            support_check: result.support_check.as_ref().map(|check| SupportCheckJson {
+                supported: check.supported,
+                unsupported_claims: check.unsupported_claims.clone(),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_query_json_report_serializes_enum_values_consistently() {
+        let report = QueryJsonReport {
+            question: "How do config and metadata interact?".to_string(),
+            answer: Some("They interact during query execution.".to_string()),
+            mode: "agentic".to_string(),
+            hits: Vec::new(),
+            plan: Some(PlanJson {
+                question_type: QuestionType::MultiHop,
+                strategy: RetrievalStrategy::BroadThenRerank,
+                reasoning: "needs multiple facts".to_string(),
+                subqueries: vec!["config".to_string(), "metadata".to_string()],
+            }),
+            iterations: vec![IterationJson {
+                iteration: 1,
+                verdict: EvidenceVerdict::Sufficient,
+                retrieved: 3,
+                kept: 2,
+            }],
+            support_check: None,
+        };
+
+        let value = serde_json::to_value(report).unwrap();
+
+        assert_eq!(value["plan"]["question_type"], json!("MultiHop"));
+        assert_eq!(value["plan"]["strategy"], json!("BroadThenRerank"));
+        assert_eq!(value["iterations"][0]["verdict"], json!("Sufficient"));
+    }
 }

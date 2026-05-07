@@ -32,8 +32,7 @@ impl CliOutput {
         assert!(
             self.success,
             "command failed\nstdout:\n{}\nstderr:\n{}",
-            self.stdout,
-            self.stderr
+            self.stdout, self.stderr
         );
     }
 
@@ -213,7 +212,12 @@ fn route_request(config: &MockOllamaConfig, request: &HttpRequest) -> (&'static 
         ("POST", "/api/embed") => {
             let input = serde_json::from_str::<Value>(&request.body)
                 .ok()
-                .and_then(|value| value.get("input").and_then(Value::as_str).map(str::to_owned))
+                .and_then(|value| {
+                    value
+                        .get("input")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
                 .unwrap_or_default();
             let body = serde_json::json!({
                 "embeddings": [compute_embedding(&input)],
@@ -265,5 +269,7 @@ fn write_response(stream: &mut TcpStream, status: &str, body: &str) {
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }

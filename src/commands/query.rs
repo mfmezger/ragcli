@@ -21,6 +21,7 @@ pub struct QueryCommand {
     pub format: Option<String>,
     pub gen_model: Option<String>,
     pub max_tokens: usize,
+    pub json: bool,
 }
 
 pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {

@@ -118,6 +118,9 @@ pub enum Command {
         /// Maximum number of tokens to generate.
         #[arg(long, default_value_t = 256)]
         max_tokens: usize,
+        /// Prints machine-readable JSON instead of the default text report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Shows or updates configuration values.
     Config {
@@ -319,6 +322,12 @@ mod tests {
                 command: ConfigCommand::Show { json },
             } => assert!(json),
             command => panic!("expected config show command, got {command:?}"),
+        }
+
+        let query = Cli::try_parse_from(["ragcli", "query", "test", "--json"]).unwrap();
+        match query.command {
+            Command::Query { json, .. } => assert!(json),
+            command => panic!("expected query command, got {command:?}"),
         }
     }
 }
