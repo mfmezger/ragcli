@@ -3,6 +3,7 @@
 [![Cargo Test](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml/badge.svg)](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml)
 [![Coverage](https://img.shields.io/badge/coverage-80%25%20required-brightgreen)](https://github.com/mfmezger/ragcli/actions/workflows/cargo-test.yml)
 [![Rust 2021](https://img.shields.io/badge/rust-2021-orange)](https://www.rust-lang.org/)
+[![crates.io](https://img.shields.io/crates/v/ragcli.svg)](https://crates.io/crates/ragcli)
 
 `ragcli` is a small local RAG CLI written in Rust.
 
@@ -23,6 +24,14 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 
 ## Quick Start
 
+Install [`ragcli` from crates.io](https://crates.io/crates/ragcli):
+
+```bash
+cargo install ragcli
+```
+
+Then:
+
 1. Start Ollama.
 2. Pull the embedding and chat models.
 3. Index a local file or folder.
@@ -32,83 +41,72 @@ It indexes local files into a persistent LanceDB store, uses Ollama for embeddin
 ollama pull nomic-embed-text-v2-moe:latest
 ollama pull qwen3.5:4b
 
-cargo run -- --help
-cargo run -- doctor
-cargo run -- stat
-cargo run -- index ./docs
-cargo run -- query "What is this project about?"
-```
-
-To install the CLI locally so you can run `ragcli` from other folders:
-
-```bash
-cargo install --path .
 ragcli --help
-```
-
-If you rebuild often during development, reinstall the current checkout with:
-
-```bash
-cargo install --path . --force
+ragcli doctor
+ragcli stat
+ragcli index ./docs
+ragcli query "What is this project about?"
 ```
 
 If `ragcli` is not found after installation, make sure `~/.cargo/bin` is on your `PATH`.
+
+When developing from a local checkout, you can also run commands with `cargo run --`, or install the checkout with `cargo install --path . --force`.
 
 ## Commands
 
 Index a directory or file:
 
 ```bash
-cargo run -- index ./docs
-cargo run -- index ./My_Neighbor_Totoro.pdf
-cargo run -- index ./images
-cargo run -- index . --exclude '**/target/**' --exclude '**/.git/**'
+ragcli index ./docs
+ragcli index ./My_Neighbor_Totoro.pdf
+ragcli index ./images
+ragcli index . --exclude '**/target/**' --exclude '**/.git/**'
 ```
 
 Use a named store:
 
 ```bash
-cargo run -- index ./docs --name work
-cargo run -- query "Summarize the notes" --name work
+ragcli index ./docs --name work
+ragcli query "Summarize the notes" --name work
 ```
 
 Inspect retrieved context before generation:
 
 ```bash
-cargo run -- query "What is My Neighbor Totoro about?" --show-context
-cargo run -- query "Summarize this file" --source ./notes/today.md
-cargo run -- query "What happens on this page?" --source ./My_Neighbor_Totoro.pdf --page 3
-cargo run -- query "What changed in the docs?" --path-prefix ./docs/
-cargo run -- query "Summarize the markdown notes" --format markdown
-cargo run -- query "What is this project about?" --mode hybrid --show-plan
-cargo run -- query "Summarize the release notes" --mode agentic --show-trace
-cargo run -- query "Which file mentions Totoro?" --show-citations --show-scores
+ragcli query "What is My Neighbor Totoro about?" --show-context
+ragcli query "Summarize this file" --source ./notes/today.md
+ragcli query "What happens on this page?" --source ./My_Neighbor_Totoro.pdf --page 3
+ragcli query "What changed in the docs?" --path-prefix ./docs/
+ragcli query "Summarize the markdown notes" --format markdown
+ragcli query "What is this project about?" --mode hybrid --show-plan
+ragcli query "Summarize the release notes" --mode agentic --show-trace
+ragcli query "Which file mentions Totoro?" --show-citations --show-scores
 ```
 
 Check local setup:
 
 ```bash
-cargo run -- doctor
-cargo run -- doctor --json
+ragcli doctor
+ragcli doctor --json
 ```
 
 Inspect what is already embedded:
 
 ```bash
-cargo run -- stat
-cargo run -- stat --json
-cargo run -- sources
-cargo run -- ls
+ragcli stat
+ragcli stat --json
+ragcli sources
+ragcli ls
 ```
 
 Remove or clean indexed content:
 
 ```bash
-cargo run -- delete ./notes/today.md
-cargo run -- prune
-cargo run -- prune --json
-cargo run -- prune --apply
-cargo run -- clear --yes
+ragcli delete ./notes/today.md
+ragcli prune
+ragcli prune --json
+ragcli prune --apply
+ragcli clear --yes
 ```
 
 ## Configuration
@@ -147,10 +145,10 @@ export RAGCLI_VISION_MODEL=qwen3.5:4b
 You can inspect and update config without editing TOML by hand:
 
 ```bash
-cargo run -- config show
-cargo run -- config show --json
-cargo run -- config set models.embed nomic-embed-text-v2-moe:latest
-cargo run -- config set ollama.base_url http://localhost:11434
+ragcli config show
+ragcli config show --json
+ragcli config set models.embed nomic-embed-text-v2-moe:latest
+ragcli config set ollama.base_url http://localhost:11434
 ```
 
 Supported indexable formats currently include:
@@ -324,7 +322,7 @@ Releases are configured with `cargo-release` through [`Cargo.toml`](Cargo.toml).
 - create tags as `v<version>`
 - regenerate [`CHANGELOG.md`](CHANGELOG.md) with [`git-cliff`](https://git-cliff.org/) before the release commit
 - default to `cargo release` dry runs unless you pass `--execute`
-- skip crates.io publishing for now
+- skip automatic crates.io publishing during `cargo release` so publishing can be done explicitly with `cargo publish`
 
 Typical usage:
 
@@ -333,4 +331,5 @@ cargo install cargo-release
 cargo install git-cliff
 cargo release patch
 cargo release patch --execute
+cargo publish
 ```
