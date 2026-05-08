@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 description = "CLI for local RAG"
+license = "MIT"
+repository = "https://github.com/mfmezger/ragcli"
+homepage = "https://github.com/mfmezger/ragcli"
 
 [package.metadata.release]
 allow-branch = ["main"]
