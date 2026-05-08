@@ -13,7 +13,9 @@ use crate::rewrite::{rewrite_query_for_retrieval, QueryRewriteSet};
 use crate::store;
 use crate::ui::Panel;
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::BTreeSet;
+use std::time::Duration;
 use tracing::{field, Instrument};
 
 use super::render::{
@@ -25,6 +27,9 @@ use super::runtime::{mode_label, prepare_runtime};
 use super::types::{QueryExecutionPath, QueryJsonReport, QueryResult, QueryRuntime};
 
 pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
+    let progress = QueryProgress::new(!command.json);
+    progress.set("Preparing query runtime");
+
     let runtime = prepare_runtime(name, &command)?;
     let execution = execution_path(command.mode);
     let span = tracing::info_span!(
@@ -49,10 +54,12 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
     let span_inner = span.clone();
     async move {
         let result = match execution {
-            QueryExecutionPath::Simple => run_simple_query(&runtime, &command).await?,
-            QueryExecutionPath::Agentic => run_agentic_query_command(&runtime, &command).await?,
+            QueryExecutionPath::Simple => run_simple_query(&runtime, &command, &progress).await?,
+            QueryExecutionPath::Agentic => {
+                run_agentic_query_command(&runtime, &command, &progress).await?
+            }
             QueryExecutionPath::AgenticStub => {
-                run_agentic_stub_query_command(&runtime, &command).await?
+                run_agentic_stub_query_command(&runtime, &command, &progress).await?
             }
         };
 
@@ -69,15 +76,17 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
                 );
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                let mut panel = Panel::new("Query Result");
-                panel.kv("status", "No relevant context found in the local store.", 8);
-                panel.render();
+                progress.suspend(|| {
+                    let mut panel = Panel::new("Query Result");
+                    panel.kv("status", "No relevant context found in the local store.", 8);
+                    panel.render();
+                });
             }
             return Ok(());
         }
 
         if command.json {
-            let answer = stripped_answer(&runtime, &command, &result).await?;
+            let answer = stripped_answer(&runtime, &command, &result, &progress).await?;
             let report = QueryJsonReport::from_result(
                 &command.question,
                 mode_label(command.mode),
@@ -88,33 +97,46 @@ pub async fn run(name: Option<&str>, command: QueryCommand) -> Result<()> {
             return Ok(());
         }
 
-        print_query_plan(&command, &result);
-        print_query_trace(&command, &result);
-        print_scores(&command, &result);
-        print_citations(&command, &result);
-        print_contexts(&command, &result);
+        progress.suspend(|| {
+            print_query_plan(&command, &result);
+            print_query_trace(&command, &result);
+            print_scores(&command, &result);
+            print_citations(&command, &result);
+            print_contexts(&command, &result);
+        });
 
-        let answer = stripped_answer(&runtime, &command, &result).await?;
-        println!();
-        let mut panel = Panel::new("Answer");
-        panel.prose("", answer.trim(), 0);
-        panel.render();
+        let answer = stripped_answer(&runtime, &command, &result, &progress).await?;
+        progress.suspend(|| {
+            println!();
+            let mut panel = Panel::new("Answer");
+            panel.prose("", answer.trim(), 0);
+            panel.render();
+        });
         Ok(())
     }
     .instrument(span)
     .await
 }
 
-async fn run_simple_query(runtime: &QueryRuntime, command: &QueryCommand) -> Result<QueryResult> {
+async fn run_simple_query(
+    runtime: &QueryRuntime,
+    command: &QueryCommand,
+    progress: &QueryProgress,
+) -> Result<QueryResult> {
     let span = tracing::info_span!("run_simple_query", mode = ?command.mode);
     async move {
         let mut trace = vec![format!(
             "mode {} uses the current hybrid retrieval pipeline",
             mode_label(command.mode)
         )];
-        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
-        let hits = retrieve_candidates(runtime, command, &rewrite_set.query_variants(), &mut trace)
-            .await?;
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace, progress).await;
+        let queries = rewrite_set.query_variants();
+        progress.set(format!(
+            "Retrieving candidates from {} query variant(s)",
+            queries.len()
+        ));
+        let hits = retrieve_candidates(runtime, command, &queries, &mut trace).await?;
+        progress.set(format!("Retrieved {} candidate(s)", hits.len()));
 
         Ok(QueryResult {
             requested_mode: command.mode,
@@ -135,6 +157,7 @@ async fn run_simple_query(runtime: &QueryRuntime, command: &QueryCommand) -> Res
 async fn run_agentic_query_command(
     runtime: &QueryRuntime,
     command: &QueryCommand,
+    progress: &QueryProgress,
 ) -> Result<QueryResult> {
     let span = tracing::info_span!(
         "run_agentic_query",
@@ -152,6 +175,7 @@ async fn run_agentic_query_command(
             "mode {} uses the agentic retrieval loop",
             mode_label(command.mode)
         )];
+        progress.set(format!("Planning query with {}", runtime.gen_model_name));
         let plan = match build_query_plan(&generator, &command.question).await {
             Ok(plan) => {
                 trace.push("planner produced a structured query plan".to_string());
@@ -166,7 +190,7 @@ async fn run_agentic_query_command(
             }
         };
 
-        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace, progress).await;
         let mut iterations = Vec::new();
         let mut previous_keys = Vec::new();
         let mut active_queries = initial_agent_queries(&command.question, &plan, &rewrite_set);
@@ -177,11 +201,21 @@ async fn run_agentic_query_command(
                 "iteration {iteration}: querying {} variant(s)",
                 active_queries.len()
             ));
+            progress.set(format!(
+                "Iteration {iteration}/{}: retrieving from {} query variant(s)",
+                command.max_iterations.max(1),
+                active_queries.len()
+            ));
             let iteration_hits =
                 retrieve_candidates(runtime, command, &active_queries, &mut trace).await?;
             let retrieved_count = iteration_hits.len();
             accumulated_hits = merge_candidates([accumulated_hits, iteration_hits]);
             let kept_hits = prune_candidates(accumulated_hits.clone(), command.top_k);
+            progress.set(format!(
+                "Iteration {iteration}/{}: assessing {} retained context(s)",
+                command.max_iterations.max(1),
+                kept_hits.len()
+            ));
             let assessment = match assess_evidence(&generator, &command.question, &kept_hits).await
             {
                 Ok(assessment) => assessment,
@@ -250,7 +284,8 @@ async fn run_agentic_query_command(
             });
         }
 
-        let answer = generate_answer_from_hits(runtime, command, &final_hits).await?;
+        let answer = generate_answer_from_hits(runtime, command, &final_hits, progress).await?;
+        progress.set("Verifying answer support");
         let support_check = match verify_answer_support(
             &generator,
             &command.question,
@@ -269,8 +304,13 @@ async fn run_agentic_query_command(
             }
         };
         if support_check.supported {
+            progress.set("Answer support verification passed");
             trace.push("answer support verification passed".to_string());
         } else {
+            progress.set(format!(
+                "Answer support verification found {} unsupported claim(s)",
+                support_check.unsupported_claims.len()
+            ));
             trace.push(format!(
                 "answer support verification found {} unsupported claim(s)",
                 support_check.unsupported_claims.len()
@@ -296,6 +336,7 @@ async fn run_agentic_query_command(
 async fn run_agentic_stub_query_command(
     runtime: &QueryRuntime,
     command: &QueryCommand,
+    progress: &QueryProgress,
 ) -> Result<QueryResult> {
     let span = tracing::info_span!("run_agentic_stub_query", mode = ?command.mode);
     async move {
@@ -303,11 +344,16 @@ async fn run_agentic_stub_query_command(
             "requested {} mode routed through the graph-mode placeholder path",
             mode_label(command.mode)
         )];
-        let rewrite_set = build_rewrite_set(runtime, command, &mut trace).await;
+        let rewrite_set = build_rewrite_set(runtime, command, &mut trace, progress).await;
         let stub_plan = placeholder_plan(command.mode, &rewrite_set);
         trace.extend(stub_plan.notes.iter().cloned());
+        progress.set(format!(
+            "Retrieving candidates from {} query variant(s)",
+            stub_plan.query_variants.len()
+        ));
         let hits =
             retrieve_candidates(runtime, command, &stub_plan.query_variants, &mut trace).await?;
+        progress.set(format!("Retrieved {} candidate(s)", hits.len()));
 
         Ok(QueryResult {
             requested_mode: command.mode,
@@ -329,6 +375,7 @@ async fn build_rewrite_set(
     runtime: &QueryRuntime,
     command: &QueryCommand,
     trace: &mut Vec<String>,
+    progress: &QueryProgress,
 ) -> QueryRewriteSet {
     let span = tracing::info_span!(
         "build_rewrite_set",
@@ -337,10 +384,12 @@ async fn build_rewrite_set(
     );
     async move {
         if !command.rewrite {
+            progress.set("Using original question as retrieval query");
             trace.push("rewrite disabled; using original query only".to_string());
             return QueryRewriteSet::fallback(&command.question);
         }
 
+        progress.set(format!("Rewriting query with {}", runtime.gen_model_name));
         let generator = Generator::new(
             runtime.cfg.ollama.base_url.clone(),
             runtime.gen_model_name.clone(),
@@ -374,10 +423,11 @@ async fn stripped_answer(
     runtime: &QueryRuntime,
     command: &QueryCommand,
     result: &QueryResult,
+    progress: &QueryProgress,
 ) -> Result<String> {
     let answer = match &result.answer {
         Some(answer) => answer.clone(),
-        None => generate_answer_from_hits(runtime, command, &result.hits).await?,
+        None => generate_answer_from_hits(runtime, command, &result.hits, progress).await?,
     };
     Ok(store::strip_thinking(&answer))
 }
@@ -386,6 +436,7 @@ async fn generate_answer_from_hits(
     runtime: &QueryRuntime,
     command: &QueryCommand,
     hits: &[RetrievalCandidate],
+    progress: &QueryProgress,
 ) -> Result<String> {
     let span = tracing::info_span!(
         "generate_answer_from_hits",
@@ -394,6 +445,11 @@ async fn generate_answer_from_hits(
         max_tokens = command.max_tokens,
     );
     async move {
+        progress.set(format!(
+            "Generating answer with {} from {} context(s)",
+            runtime.gen_model_name,
+            hits.len()
+        ));
         let generator = Generator::new(
             runtime.cfg.ollama.base_url.clone(),
             runtime.gen_model_name.clone(),
@@ -405,6 +461,47 @@ async fn generate_answer_from_hits(
     }
     .instrument(span)
     .await
+}
+
+struct QueryProgress {
+    bar: Option<ProgressBar>,
+}
+
+impl QueryProgress {
+    fn new(enabled: bool) -> Self {
+        if !enabled {
+            return Self { bar: None };
+        }
+
+        let bar = ProgressBar::new_spinner();
+        let style = ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+            .expect("valid progress template");
+        bar.set_style(style);
+        bar.enable_steady_tick(Duration::from_millis(120));
+        Self { bar: Some(bar) }
+    }
+
+    fn set(&self, message: impl Into<String>) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(message.into());
+        }
+    }
+
+    fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        if let Some(bar) = &self.bar {
+            bar.suspend(f)
+        } else {
+            f()
+        }
+    }
+}
+
+impl Drop for QueryProgress {
+    fn drop(&mut self) {
+        if let Some(bar) = &self.bar {
+            bar.finish_and_clear();
+        }
+    }
 }
 
 fn initial_agent_queries(
